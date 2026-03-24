@@ -1,8 +1,8 @@
-name: Build Poco F6 Mutan Kernels
+name: Build Poco F6 Mutan Kernels (Extreme Edition)
 
 on:
   push:
-    branches: [ "peridot-u-oss" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -12,13 +12,13 @@ jobs:
 
     steps:
       # =========================================================
-      # [1] CHECKOUT KERNEL SOURCE
+      # [1] CHECKOUT KERNEL SOURCE (YOUR MUTAN FORK)
       # =========================================================
-      - name: Checkout Kernel Source
+      - name: Checkout Mutan Source
         uses: actions/checkout@v4
         with:
-          repository: 'MiCode/Xiaomi_Kernel_OpenSource'
-          ref: 'peridot-u-oss'
+          repository: 'harunaltair/Realking_kernel_peridot_mutan'
+          ref: 'main'
           fetch-depth: 1
 
       # =========================================================
@@ -72,133 +72,41 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
       # =========================================================
-      # [5] SANITIZE XIAOMI OSS SOURCE
-      # =========================================================
-      - name: Sanitize Xiaomi OSS Source
-        run: |
-          set -e
-          sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
-          sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
-          echo "✅ Xiaomi OSS source sanitized"
-
-      # =========================================================
-      # [6] FIX BROKEN UAPI HEADERS
-      # =========================================================
-      - name: Fix Broken UAPI Headers
-        run: |
-          set -e
-
-          # ----------------------------------------------------------
-          # Fix 1: ispv4_defs.h
-          # Masalah : memakai uint32_t/uint64_t yang tidak valid di UAPI
-          # Fix     : ganti ke __u32/__u64, lalu include linux/types.h
-          # ----------------------------------------------------------
-          ISPV4=$(find include/uapi -name "ispv4_defs.h" 2>/dev/null | head -n 1)
-          if [ -n "$ISPV4" ]; then
-            sed -i \
-              's/\buint8_t\b/__u8/g;
-               s/\buint16_t\b/__u16/g;
-               s/\buint32_t\b/__u32/g;
-               s/\buint64_t\b/__u64/g;
-               s/\bint8_t\b/__s8/g;
-               s/\bint16_t\b/__s16/g;
-               s/\bint32_t\b/__s32/g;
-               s/\bint64_t\b/__s64/g' "$ISPV4"
-            if ! grep -q "linux/types.h" "$ISPV4"; then
-              sed -i '1s|^|#include <linux/types.h>\n|' "$ISPV4"
-            fi
-            echo "✅ Patched: $ISPV4"
-          else
-            echo "⚠️  ispv4_defs.h tidak ditemukan di include/uapi, skip."
-          fi
-
-          # ----------------------------------------------------------
-          # Fix 2: videodev2.h
-          #
-          # ROOT CAUSE: videodev2.h Xiaomi OSS memakai 'struct timespec'
-          # (bukan __kernel_timespec), tapi tidak pernah include linux/time.h
-          # yang mendefinisikannya. Akibatnya HDRTEST gagal saat ispv4_defs.h
-          # meng-include videodev2.h.
-          #
-          # FIX: Inject '#include <linux/time.h>' tepat setelah baris
-          # '#include <linux/types.h>' yang sudah ada di videodev2.h.
-          # Ini memastikan 'struct timespec' punya definisi lengkap.
-          # ----------------------------------------------------------
-          VIDEODEV=$(find include/uapi -name "videodev2.h" 2>/dev/null | head -n 1)
-          if [ -n "$VIDEODEV" ]; then
-            # Bersihkan inject lama supaya idempotent (aman di-run ulang)
-            sed -i '/#include <linux\/time\.h>/d' "$VIDEODEV"
-            sed -i '/#include <linux\/time_types\.h>/d' "$VIDEODEV"
-
-            # Inject linux/time.h setelah linux/types.h
-            if grep -q "#include <linux/types.h>" "$VIDEODEV"; then
-              sed -i '/#include <linux\/types\.h>/a #include <linux\/time.h>' "$VIDEODEV"
-              echo "✅ Patched (setelah types.h): $VIDEODEV"
-            else
-              # Fallback: inject di baris pertama file
-              sed -i '1s|^|#include <linux/time.h>\n|' "$VIDEODEV"
-              echo "✅ Patched (fallback baris 1): $VIDEODEV"
-            fi
-          else
-            echo "⚠️  videodev2.h tidak ditemukan di include/uapi, skip."
-          fi
-
-      # =========================================================
-      # [7] INTEGRASI KERNELSU NEXT (FIXED FOR REALKING BASE)
+      # [5] SETUP KERNELSU NEXT (REALKING ALIGNED)
       # =========================================================
       - name: Setup KernelSU Next
         run: |
           set -e
-          echo "Membersihkan sisa-sisa KSU lama untuk mencegah konflik..."
-          # 1. Hapus folder KSU lama jika ada
+          echo "Sinkronisasi KernelSU Next dengan hook Realking..."
+          
+          # Hapus sisa-sisa folder KSU lama jika ada agar clone bersih
           rm -rf drivers/kernelsu drivers/kernelsu-next
           
-          # 2. Hapus referensi Kconfig lama di drivers/Kconfig agar tidak double/broken
-          # Ini kunci untuk memperbaiki error "can't open file"
-          sed -i '/kernelsu/d' drivers/Kconfig
-          sed -i '/kernelsu-next/d' drivers/Kconfig
-
-          # 3. Clone KernelSU Next
-          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
+          # CLONE KSU-Next langsung ke folder 'drivers/kernelsu' 
+          # Karena Kconfig Realking mencari folder ini.
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu
           
-          # 4. Handle struktur folder (Next version sering punya subfolder 'kernel')
-          if [ -d "drivers/kernelsu-next/kernel" ]; then
-            mv drivers/kernelsu-next/kernel/* drivers/kernelsu-next/
-            rm -rf drivers/kernelsu-next/kernel
+          if [ -d "drivers/kernelsu/kernel" ]; then
+            mv drivers/kernelsu/kernel/* drivers/kernelsu/
+            rm -rf drivers/kernelsu/kernel
           fi
-
-          # 5. Suntikkan ulang secara bersih ke Makefile & Kconfig
-          echo "obj-y += kernelsu-next/" >> drivers/Makefile
-          # Gunakan perintah 'sed' untuk menyisipkan sebelum baris terakhir 'endmenu'
-          sed -i '/endmenu/i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig
           
-          echo "✅ KernelSU Next terpasang secara bersih."
+          echo "✅ KernelSU Next disinkronkan ke drivers/kernelsu"
 
       # =========================================================
-      # [8] KERNEL CONFIG SETUP
+      # [6] MUTAN EXTREME CONFIGURATION
       # =========================================================
       - name: Kernel Config Setup
         run: |
           set -e
 
-          if [ -f "arch/arm64/configs/vendor/peridot_user_defconfig" ]; then
-            CONF="vendor/peridot_user_defconfig"
-          elif [ -f "arch/arm64/configs/peridot_user_defconfig" ]; then
-            CONF="peridot_user_defconfig"
-          elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
-            CONF="gki_defconfig"
-          else
-            FOUND=$(find arch/arm64/configs/ -name "*peridot*" | head -n 1)
-            if [ -z "$FOUND" ]; then
-              echo "❌ Tidak ada defconfig yang ditemukan! Periksa repo source."
-              exit 1
-            fi
-            CONF=$(echo "$FOUND" | sed 's|arch/arm64/configs/||')
-            echo "⚠️  Menggunakan fallback defconfig: $CONF"
-          fi
-
-          echo "TARGET_DEFCONFIG=$CONF" >> $GITHUB_ENV
-          DEFCONFIG="arch/arm64/configs/$CONF"
+          # Realking biasanya menggunakan peridot_defconfig
+          CONF="arch/arm64/configs/vendor/peridot_defconfig"
+          [ ! -f "$CONF" ] && CONF="arch/arm64/configs/peridot_defconfig"
+          [ ! -f "$CONF" ] && CONF=$(find arch/arm64/configs/ -name "*peridot*" | head -n 1)
+          
+          echo "TARGET_DEFCONFIG=$(basename $CONF)" >> $GITHUB_ENV
+          DEFCONFIG="$CONF"
           echo "✅ Menggunakan defconfig: $DEFCONFIG"
 
           set_config() {
@@ -207,132 +115,67 @@ jobs:
             echo "$1=$2" >> "$DEFCONFIG"
           }
 
-          # [A] COMPILATION STABILITY
-          set_config CONFIG_FRAME_WARN          4096
-          set_config CONFIG_WERROR              n
-          set_config CONFIG_FTRACE              n
-          set_config CONFIG_FUNCTION_TRACER     n
-          set_config CONFIG_TRACING             y
-          set_config CONFIG_TRACE_CLOCK         y
+          echo "=== Applying Mutan Extreme Optimizations ==="
+
+          # [A] COMPILATION & EXTREME OPTIMIZATION
+          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' "$DEFCONFIG" || true
+          set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3 y
+          set_config CONFIG_FRAME_WARN 4096
+          set_config CONFIG_WERROR n
+          set_config CONFIG_LTO_CLANG_THIN y
+          set_config CONFIG_HZ_300 y
+          
+          # Disable Heavy Tracing
+          set_config CONFIG_FTRACE n
+          set_config CONFIG_FUNCTION_TRACER n
+          set_config CONFIG_TRACING y
+          set_config CONFIG_TRACE_CLOCK y
 
           # [B] ROOT ACCESS — KernelSU Next
-          set_config CONFIG_KSU                 y
-          set_config CONFIG_KSU_NEXT            y
-          set_config CONFIG_OVERLAY_FS          y
+          set_config CONFIG_KSU y
+          set_config CONFIG_KSU_NEXT y
+          set_config CONFIG_OVERLAY_FS y
           set_config CONFIG_OVERLAY_FS_REDIRECT_DIR y
-          set_config CONFIG_OVERLAY_FS_INDEX    y
+          set_config CONFIG_OVERLAY_FS_INDEX y
 
-          # [C] CPU SCHEDULER & GOVERNOR
-          set_config CONFIG_CPU_FREQ_GOV_SCHEDUTIL          y
-          set_config CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL  y
-          set_config CONFIG_CPU_FREQ_GOV_PERFORMANCE        y
-          set_config CONFIG_CPU_FREQ_GOV_POWERSAVE          y
-          set_config CONFIG_CPU_FREQ_GOV_CONSERVATIVE       y
-          set_config CONFIG_CPU_FREQ_GOV_USERSPACE          y
-          set_config CONFIG_ENERGY_MODEL                    y
-          set_config CONFIG_CPU_IDLE                        y
-          set_config CONFIG_CPU_IDLE_GOV_TEO                y
-          set_config CONFIG_CPU_IDLE_GOV_LADDER             y
-          set_config CONFIG_CPU_IDLE_GOV_MENU               y
-          set_config CONFIG_UCLAMP_TASK                     y
-          set_config CONFIG_UCLAMP_TASK_GROUP               y
-          set_config CONFIG_HZ_300                          y
+          # [C] SCHEDULER: EAS & SCHEDUTIL
+          set_config CONFIG_CPU_FREQ_GOV_SCHEDUTIL y
+          set_config CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL y
+          set_config CONFIG_CPU_IDLE_GOV_TEO y
+          set_config CONFIG_ENERGY_MODEL y
+          set_config CONFIG_UCLAMP_TASK y
+          set_config CONFIG_UCLAMP_TASK_GROUP y
 
-          # [D] MEMORY MANAGEMENT
-          set_config CONFIG_ZRAM                            y
-          set_config CONFIG_ZSMALLOC                        y
-          set_config CONFIG_ZRAM_DEF_COMP_LZ4               y
-          set_config CONFIG_ZSWAP                           y
-          set_config CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4    y
-          set_config CONFIG_ZSWAP_ZPOOL_DEFAULT_ZSMALLOC    y
-          set_config CONFIG_TRANSPARENT_HUGEPAGE            y
-          set_config CONFIG_TRANSPARENT_HUGEPAGE_MADVISE    y
-          set_config CONFIG_PSI                             y
-          set_config CONFIG_PSI_DEFAULT_DISABLED            n
-          set_config CONFIG_MEMCG                           y
-          set_config CONFIG_MEMCG_SWAP                      y
-          set_config CONFIG_MEMCG_KMEM                      y
-          set_config CONFIG_CGROUPS                         y
-          set_config CONFIG_CGROUP_CPUACCT                  y
-          set_config CONFIG_CGROUP_SCHED                    y
-          set_config CONFIG_FAIR_GROUP_SCHED                y
-          set_config CONFIG_RT_GROUP_SCHED                  y
-          set_config CONFIG_CGROUP_FREEZER                  y
-          set_config CONFIG_CPUSETS                         y
-          set_config CONFIG_CGROUP_BPF                      y
+          # [D] MEMORY MANAGEMENT (LMKD Android 16 Ready)
+          set_config CONFIG_PSI y
+          set_config CONFIG_MEMCG y
+          set_config CONFIG_MEMCG_SWAP y
+          set_config CONFIG_MEMCG_KMEM y
+          set_config CONFIG_CGROUP_CPUACCT y
+          set_config CONFIG_ZRAM y
+          set_config CONFIG_ZSMALLOC y
+          set_config CONFIG_ZSWAP y
+          set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
+          set_config CONFIG_TRANSPARENT_HUGEPAGE y
+          set_config CONFIG_TRANSPARENT_HUGEPAGE_MADVISE y
 
           # [E] I/O SCHEDULER
-          set_config CONFIG_IOSCHED_BFQ                     y
-          set_config CONFIG_BFQ_GROUP_IOSCHED               y
-          set_config CONFIG_DEFAULT_IOSCHED                 \"bfq\"
-          set_config CONFIG_MQ_IOSCHED_KYBER                y
+          set_config CONFIG_IOSCHED_BFQ y
+          set_config CONFIG_BFQ_GROUP_IOSCHED y
+          set_config CONFIG_DEFAULT_IOSCHED \"bfq\"
+          set_config CONFIG_MQ_IOSCHED_KYBER y
 
           # [F] NETWORK
-          set_config CONFIG_TCP_CONG_BBR                    y
-          set_config CONFIG_DEFAULT_TCP_CONG                \"bbr\"
-          set_config CONFIG_NET_SCH_FQ                      y
-          set_config CONFIG_NET_SCH_FQ_CODEL                y
-          set_config CONFIG_NET_SCH_DEFAULT                 y
-          set_config CONFIG_DEFAULT_FQ_CODEL                y
-          set_config CONFIG_IPV6                            y
-          set_config CONFIG_IPV6_MULTIPLE_TABLES            y
-          set_config CONFIG_IPV6_SUBTREES                   y
-          set_config CONFIG_WIREGUARD                       y
-          set_config CONFIG_NETFILTER                       y
-          set_config CONFIG_NF_CONNTRACK                    y
-          set_config CONFIG_NF_TABLES                       y
-          set_config CONFIG_NFT_NAT                         y
-          set_config CONFIG_IP_NF_IPTABLES                  y
-          set_config CONFIG_IP_NF_FILTER                    y
-          set_config CONFIG_IP_NF_NAT                       y
-          set_config CONFIG_IP_NF_MANGLE                    y
+          set_config CONFIG_TCP_CONG_BBR y
+          set_config CONFIG_DEFAULT_TCP_CONG \"bbr\"
+          set_config CONFIG_NET_SCH_FQ y
+          set_config CONFIG_NET_SCH_FQ_CODEL y
+          set_config CONFIG_WIREGUARD y
 
-          # [G] COMPILER OPTIMIZATION
-          set_config CONFIG_LTO_CLANG_THIN                  y
-          set_config CONFIG_LTO_CLANG_FULL                  n
-          set_config CONFIG_LTO_NONE                        n
-
-          # [H] SECURITY
-          set_config CONFIG_SECURITY                        y
-          set_config CONFIG_SECURITY_SELINUX                y
-          set_config CONFIG_SECURITY_SELINUX_BOOTPARAM      y
-          set_config CONFIG_HARDENED_USERCOPY               y
-          set_config CONFIG_FORTIFY_SOURCE                  y
-          set_config CONFIG_STACKPROTECTOR_STRONG           y
-          set_config CONFIG_RANDOMIZE_BASE                  y
-          set_config CONFIG_RANDOMIZE_MEMORY                y
-
-          # [I] ANDROID SPECIFIC
-          set_config CONFIG_ANDROID                         y
-          set_config CONFIG_ANDROID_BINDER_IPC              y
-          set_config CONFIG_ANDROID_BINDERFS                y
-          set_config CONFIG_SYNC                            y
-          set_config CONFIG_SW_SYNC                         y
-          set_config CONFIG_ION                             y
-          set_config CONFIG_DMA_SHARED_BUFFER               y
-          set_config CONFIG_NAMESPACES                      y
-          set_config CONFIG_UTS_NS                          y
-          set_config CONFIG_IPC_NS                          y
-          set_config CONFIG_PID_NS                          y
-          set_config CONFIG_NET_NS                          y
-          set_config CONFIG_USER_NS                         y
-
-          # [J] FILESYSTEMS
-          set_config CONFIG_EXT4_FS                         y
-          set_config CONFIG_EXT4_FS_POSIX_ACL               y
-          set_config CONFIG_F2FS_FS                         y
-          set_config CONFIG_F2FS_FS_COMPRESSION             y
-          set_config CONFIG_EROFS_FS                        y
-          set_config CONFIG_EROFS_FS_ZIP                    y
-          set_config CONFIG_TMPFS                           y
-          set_config CONFIG_TMPFS_POSIX_ACL                 y
-          set_config CONFIG_FUSE_FS                         y
-          set_config CONFIG_SDCARD_FS                       y
-
-          echo "✅ Semua config berhasil di-set"
+          echo "✅ Semua config Mutan berhasil di-set"
 
       # =========================================================
-      # [9] BUILD KERNEL
+      # [7] BUILD KERNEL
       # =========================================================
       - name: Build Kernel
         run: |
@@ -375,7 +218,7 @@ jobs:
             Image.gz 2>&1 | tee build.log
 
       # =========================================================
-      # [10] UPLOAD BUILD LOG — selalu, bahkan kalau gagal
+      # [8] UPLOAD BUILD LOG
       # =========================================================
       - name: Upload Build Log
         if: always()
@@ -385,7 +228,7 @@ jobs:
           path: build.log
 
       # =========================================================
-      # [11] PACKAGE ANYKERNEL3
+      # [9] PACKAGE ANYKERNEL3
       # =========================================================
       - name: Package AnyKernel3
         run: |
@@ -402,7 +245,7 @@ jobs:
 
           cat > anykernel.sh << 'EOF'
           properties() { '
-          kernel.string=Mutan-Kernel-A16-NextGen
+          kernel.string=Mutan-Kernel-A16-Extreme
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -430,7 +273,7 @@ jobs:
           echo "✅ Package selesai: kernel-mutan.zip"
 
       # =========================================================
-      # [12] UPLOAD KERNEL
+      # [10] UPLOAD KERNEL
       # =========================================================
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
