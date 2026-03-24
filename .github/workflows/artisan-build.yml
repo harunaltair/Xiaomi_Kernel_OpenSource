@@ -18,9 +18,6 @@ jobs:
           ref: 'peridot-u-oss'
           fetch-depth: 1
 
-      # ---------------------------------------------------------
-      # PRAKTIK TERBAIK: Caching Toolchain
-      # ---------------------------------------------------------
       - name: Cache Toolchain
         id: cache-toolchain
         uses: actions/cache@v4
@@ -37,141 +34,85 @@ jobs:
           gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
           binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
-      - name: Setup Toolchain (ZyCromerZ Clang 15)
+      - name: Setup Toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p toolchain && cd toolchain
           curl -L --retry 3 --retry-delay 5 -o clang.tar.gz "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
-          FILESIZE=$(stat -c%s clang.tar.gz)
-          if [ "$FILESIZE" -lt 1000000 ]; then
-            echo "ERROR: Download gagal."
-            exit 1
-          fi
           tar -xf clang.tar.gz
           rm -f clang.tar.gz
 
       - name: Add Toolchain to PATH
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
-      # ---------------------------------------------------------
-      # SANITASI & INTEGRASI SISTEM
-      # ---------------------------------------------------------
-      - name: Sanitize Xiaomi OSS Source & Setup KernelSU
+      # =========================
+      # FIXED: KernelSU Injection
+      # =========================
+      - name: Setup KernelSU Next
         run: |
           set -e
-          echo "Memperbaiki referensi Kconfig/Makefile yang rusak dari vendor..."
-          sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
-          sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
 
-          echo "Setup KernelSU Next..."
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
-          
-          if [ -d "drivers/kernelsu-next/kernel" ]; then
-            KSU_MAKEFILE_PATH="kernelsu-next/kernel/"
-            KSU_KCONFIG_PATH="drivers/kernelsu-next/kernel/Kconfig"
-          else
-            KSU_MAKEFILE_PATH="kernelsu-next/"
-            KSU_KCONFIG_PATH="drivers/kernelsu-next/Kconfig"
-          fi
-          
+
+          # FIX: path harus konsisten
           if ! grep -q "kernelsu-next" drivers/Makefile; then
-            echo "obj-y += $KSU_MAKEFILE_PATH" >> drivers/Makefile
-          fi
-          if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            sed -i "/endmenu/i source \"$KSU_KCONFIG_PATH\"" drivers/Kconfig || echo "source \"$KSU_KCONFIG_PATH\"" >> drivers/Kconfig
+            echo "obj-y += kernelsu-next/" >> drivers/Makefile
           fi
 
-      # ---------------------------------------------------------
-      # MANAJEMEN KONFIGURASI (Targeting GKI 2.0 Defconfig)
-      # ---------------------------------------------------------
-      - name: Artisan Optimizations & New Features
+          if ! grep -q "kernelsu-next" drivers/Kconfig; then
+            echo 'source "drivers/kernelsu-next/Kconfig"' >> drivers/Kconfig
+          fi
+
+      # =========================
+      # SAFE CONFIG (NO GKI BREAK)
+      # =========================
+      - name: Kernel Config Setup
         run: |
           set -e
-          
-          # Karena Poco F6 (SM8635) adalah GKI 2.0, defconfig utamanya
-          # adalah gki_defconfig standar, BUKAN peridot_defconfig.
-          FOUND_DEFCONFIG="arch/arm64/configs/gki_defconfig"
-          
-          if [ ! -f "$FOUND_DEFCONFIG" ]; then
-            echo "❌ FATAL ERROR: gki_defconfig tidak ditemukan!"
-            ls -la arch/arm64/configs/
+
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+
+          if [ ! -f "$DEFCONFIG" ]; then
+            echo "❌ gki_defconfig tidak ditemukan"
             exit 1
           fi
-          
-          echo "✅ Menggunakan GKI Defconfig: $FOUND_DEFCONFIG"
-          echo "TARGET_DEFCONFIG=$FOUND_DEFCONFIG" >> $GITHUB_ENV
-          
-          # Helper function injeksi config yang idempoten
+
+          echo "TARGET_DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
+
           set_config() {
-            local KEY=$1
-            local VAL=$2
-            sed -i "/^$KEY/d" "$FOUND_DEFCONFIG" || true
-            echo "$KEY=$VAL" >> "$FOUND_DEFCONFIG"
+            sed -i "/^$1/d" $DEFCONFIG || true
+            echo "$1=$2" >> $DEFCONFIG
           }
 
-          # 1. KSU & OverlayFS
-          set_config "CONFIG_KSU" "y"
-          set_config "CONFIG_KSU_NEXT" "y"
-          set_config "CONFIG_KSU_HIDE_PROCFS" "y"
-          set_config "CONFIG_OVERLAY_FS" "y"
+          # SAFE: hanya config yang tidak merusak dependency GKI
+          set_config CONFIG_KSU y
+          set_config CONFIG_KSU_NEXT y
+          set_config CONFIG_KSU_HIDE_PROCFS y
+          set_config CONFIG_OVERLAY_FS y
 
-          # 2. Performance (-O3 & ThinLTO)
-          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' "$FOUND_DEFCONFIG" || true
-          set_config "CONFIG_LTO_CLANG_THIN" "y"
+          set_config CONFIG_LTO_CLANG_THIN y
 
-          # 3. Debug Strip
-          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' "$FOUND_DEFCONFIG" || true
-          sed -i '/^CONFIG_DEBUG_INFO/d' "$FOUND_DEFCONFIG" || true
-          set_config "CONFIG_DEBUG_INFO_NONE" "y"
-          set_config "CONFIG_DEBUG_INFO" "n"
-          set_config "CONFIG_KALLSYMS" "n"
-          set_config "CONFIG_FTRACE" "n"
+          set_config CONFIG_TCP_CONG_BBR y
+          set_config CONFIG_DEFAULT_TCP_CONG bbr
+          set_config CONFIG_NET_SCH_FQ y
 
-          # 4. Power & Thermal
-          set_config "CONFIG_ENERGY_MODEL" "y"
-          set_config "CONFIG_CPU_IDLE" "y"
-          set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
+          set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
+          
+          # Untuk responsivitas layar yang lebih baik
+          set_config CONFIG_HZ_300 y
+          # Untuk mendukung fitur networking modern di HyperOS
+          set_config CONFIG_BPF_SYSCALL y
 
-          # 5. PELT Optimization
-          set_config "CONFIG_SCHED_WALT" "n"
-          set_config "CONFIG_HZ_300" "y"
-          set_config "CONFIG_NO_HZ_IDLE" "y"
-          set_config "CONFIG_PREEMPT_DYNAMIC" "y"
+          # ❌ DIHAPUS (biang masalah)
+          # CONFIG_KALLSYMS
+          # CONFIG_FTRACE
+          # CONFIG_DEBUG_INFO
+          # CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
 
-          # 6. Network & Memory
-          set_config "CONFIG_TCP_CONG_BBR" "y"
-          set_config "CONFIG_DEFAULT_TCP_CONG" "bbr"
-          set_config "CONFIG_NET_SCH_FQ" "y"
-          set_config "CONFIG_ZRAM_DEF_COMP_LZ4" "y"
-          set_config "CONFIG_SLAB_FREELIST_HARDENED" "y"
-
-          # 7. Security
-          set_config "CONFIG_SECCOMP" "y"
-          set_config "CONFIG_TMPFS_XATTR" "y"
-
-          # 8. Bypass Stack Frame Warning akibat optimasi -O3
-          set_config "CONFIG_FRAME_WARN" "4096"
-          # Atau jika 4096 masih kurang, gunakan "8192" atau "0" untuk disable.
-
-      # ---------------------------------------------------------
-      # PATCHING
-      # ---------------------------------------------------------
-      - name: Apply Wild Kernel Patches
-        run: |
-          set -e
-          if [ -d "$GITHUB_WORKSPACE/patches" ]; then
-            for patch in $GITHUB_WORKSPACE/patches/*.patch; do
-              echo "Applying $patch..."
-              patch -p1 < "$patch" || echo "Peringatan: Gagal menerapkan $patch, melanjutkan..."
-            done
-          else
-            echo "Folder 'patches/' tidak ditemukan, melewati tahap patching."
-          fi
-
-      # ---------------------------------------------------------
-      # KOMPILASI UTAMA
-      # ---------------------------------------------------------
-      - name: Build Kernel Binary
+      # =========================
+      # BUILD + LOGGING
+      # =========================
+      - name: Build Kernel
         run: |
           set -e
           export ARCH=arm64
@@ -180,16 +121,12 @@ jobs:
 
           mkdir -p out
 
-          # Mengambil nama defconfig dari env variable
           DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
-          echo "Generate Base Defconfig dari: $DEFCONFIG_BASENAME"
-          
+
           make O=out ARCH=arm64 $DEFCONFIG_BASENAME
 
-          echo "Update Config..."
           make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
 
-          echo "Kompilasi Utama..."
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             LLVM=1 \
@@ -203,60 +140,61 @@ jobs:
             OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
-            Image Image.gz
+            Image.gz 2>&1 | tee build.log
 
-      # ---------------------------------------------------------
-      # PACKAGING (Solusi Anti-EOF & YAML Conflict)
-      # ---------------------------------------------------------
-      - name: Package with AnyKernel3 (Mutan Edition)
+      - name: Upload Build Log
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      # =========================
+      # PACKAGING
+      # =========================
+      - name: Package AnyKernel3
         run: |
           set -e
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "Menyiapkan AnyKernel3..."
-            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3-Mutan
-            
-            cp out/arch/arm64/boot/Image.gz AK3-Mutan/
-            
-            cd AK3-Mutan
-            rm -f anykernel.sh
-            
-            # SOLUSI CTO: Gunakan echo berantai. 100% Bebas bug parser YAML/Bash.
-            echo "properties() { '" > anykernel.sh
-            echo "kernel.string=Mutan-Kernel-A16-NextGen" >> anykernel.sh
-            echo "do.devicecheck=1" >> anykernel.sh
-            echo "do.modules=0" >> anykernel.sh
-            echo "do.systemless=1" >> anykernel.sh
-            echo "do.cleanup=1" >> anykernel.sh
-            echo "do.cleanuponabort=0" >> anykernel.sh
-            echo "device.name1=peridot" >> anykernel.sh
-            echo "supported.versions=14 - 16" >> anykernel.sh
-            echo "'; }" >> anykernel.sh
-            
-            echo "block=boot" >> anykernel.sh
-            echo "is_slot_device=auto" >> anykernel.sh
-            echo "ramdisk_compression=auto" >> anykernel.sh
-            echo "patch_vbmeta_flag=auto" >> anykernel.sh
-            echo "no_magisk_check=1" >> anykernel.sh
-            echo ". tools/ak3-core.sh" >> anykernel.sh
-            
-            echo "split_boot" >> anykernel.sh
-            echo 'if [ -f "split_img/ramdisk.cpio" ]; then' >> anykernel.sh
-            echo '    unpack_ramdisk' >> anykernel.sh
-            echo '    write_boot' >> anykernel.sh
-            echo 'else' >> anykernel.sh
-            echo '    flash_boot' >> anykernel.sh
-            echo 'fi' >> anykernel.sh
 
-            echo "Membuat file ZIP..."
-            zip -r9 ../Mutan-Kernel-Peridot-A16.zip * -x '*.git*'
-          else
-            echo "❌ Build Gagal: Binary kernel (Image.gz) tidak ditemukan!"
+          if [ ! -f out/arch/arm64/boot/Image.gz ]; then
+            echo "❌ Image.gz tidak ditemukan"
             exit 1
           fi
 
-      - name: Upload Mutan Kernel
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
+          cp out/arch/arm64/boot/Image.gz AK3/
+
+          cd AK3
+
+          cat > anykernel.sh << 'EOF'
+properties() {
+  kernel.string=Mutan-Kernel-A16-NextGen
+  do.devicecheck=1
+  do.modules=0
+  do.systemless=1
+  do.cleanup=1
+  do.cleanuponabort=0
+  device.name1=peridot
+  supported.versions=14 - 16
+}
+block=boot
+is_slot_device=auto
+ramdisk_compression=auto
+patch_vbmeta_flag=auto
+no_magisk_check=1
+. tools/ak3-core.sh
+split_boot
+if [ -f "split_img/ramdisk.cpio" ]; then
+  unpack_ramdisk
+  write_boot
+else
+  flash_boot
+fi
+EOF
+
+          zip -r9 ../kernel.zip * -x '*.git*'
+
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Mutan-Kernel-A16-Package
-          path: Mutan-Kernel-Peridot-A16.zip
-          retention-days: 7
+          name: kernel
+          path: kernel.zip
