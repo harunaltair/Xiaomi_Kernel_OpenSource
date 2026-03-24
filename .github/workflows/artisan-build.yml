@@ -1,4 +1,4 @@
-name: Build Poco F6 Next-Gen Artisan Kernel
+name: Build Poco F6 Mutan Kernel
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Compile Artisan Extreme Kernel
+    name: Compile Mutan Extreme Kernel
     runs-on: ubuntu-latest
 
     steps:
@@ -29,10 +29,10 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y bc bison build-essential flex git-core gnupg gperf \
-          libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev \
-          llvm clang lld libelf-dev \
-          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-          binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+            libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev \
+            llvm clang lld libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
       - name: Setup Toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
@@ -45,38 +45,33 @@ jobs:
       - name: Add Toolchain to PATH
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
-      # =========================
-      # FIXED: KernelSU Injection
-      # =========================
+      - name: Sanitize Xiaomi OSS Source
+        run: |
+          set -e
+          echo "Membersihkan referensi hwid yang rusak..."
+          sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
+          sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
+          echo "Sanitasi selesai."
+
       - name: Setup KernelSU Next
         run: |
           set -e
-
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
-
-          # FIX: path harus konsisten
           if ! grep -q "kernelsu-next" drivers/Makefile; then
             echo "obj-y += kernelsu-next/" >> drivers/Makefile
           fi
-
           if ! grep -q "kernelsu-next" drivers/Kconfig; then
             echo 'source "drivers/kernelsu-next/Kconfig"' >> drivers/Kconfig
           fi
 
-      # =========================
-      # SAFE CONFIG (NO GKI BREAK)
-      # =========================
       - name: Kernel Config Setup
         run: |
           set -e
-
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
-
           if [ ! -f "$DEFCONFIG" ]; then
-            echo "❌ gki_defconfig tidak ditemukan"
-            exit 1
+            echo "❌ gki_defconfig tidak ditemukan, mencoba jalur vendor..."
+            DEFCONFIG="arch/arm64/configs/vendor/gki_defconfig"
           fi
-
           echo "TARGET_DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
 
           set_config() {
@@ -84,119 +79,92 @@ jobs:
             echo "$1=$2" >> $DEFCONFIG
           }
 
-          # SAFE: hanya config yang tidak merusak dependency GKI
+          # Core Features
           set_config CONFIG_KSU y
           set_config CONFIG_KSU_NEXT y
           set_config CONFIG_KSU_HIDE_PROCFS y
           set_config CONFIG_OVERLAY_FS y
-
           set_config CONFIG_LTO_CLANG_THIN y
-
+          
+          # Networking & Latency
           set_config CONFIG_TCP_CONG_BBR y
           set_config CONFIG_DEFAULT_TCP_CONG bbr
           set_config CONFIG_NET_SCH_FQ y
-
-          set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
-          
-          # Untuk responsivitas layar yang lebih baik
           set_config CONFIG_HZ_300 y
-          # Untuk mendukung fitur networking modern di HyperOS
           set_config CONFIG_BPF_SYSCALL y
+          
+          # Memory
+          set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
 
-          # ❌ DIHAPUS (biang masalah)
-          # CONFIG_KALLSYMS
-          # CONFIG_FTRACE
-          # CONFIG_DEBUG_INFO
-          # CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
-
-      # =========================
-      # BUILD + LOGGING
-      # =========================
       - name: Build Kernel
         run: |
           set -e
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
-
           mkdir -p out
-
           DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
-
+          
           make O=out ARCH=arm64 $DEFCONFIG_BASENAME
-
           make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
-
+          
           make -j$(nproc --all) O=out \
-            ARCH=arm64 \
-            LLVM=1 \
-            CC=clang \
+            ARCH=arm64 LLVM=1 CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             Image.gz 2>&1 | tee build.log
 
       - name: Upload Build Log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: build.log
 
-      # =========================
-      # PACKAGING
-      # =========================
       - name: Package AnyKernel3
         run: |
           set -e
-
           if [ ! -f out/arch/arm64/boot/Image.gz ]; then
             echo "❌ Image.gz tidak ditemukan"
             exit 1
           fi
-
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
           cp out/arch/arm64/boot/Image.gz AK3/
-
           cd AK3
-
+          
+          # Buat anykernel.sh secara dinamis
           cat > anykernel.sh << 'EOF'
           properties() {
-            kernel.string=Mutan-Kernel-A16-NextGen
-            do.devicecheck=1
-            do.modules=0
-            do.systemless=1
-            do.cleanup=1
-            do.cleanuponabort=0
-            device.name1=peridot
-            supported.versions=14 - 16
+          kernel.string=Mutan-Kernel-A16-NextGen
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=peridot
+          supported.versions=14 - 16
           }
-
           block=boot
           is_slot_device=auto
           ramdisk_compression=auto
           patch_vbmeta_flag=auto
           no_magisk_check=1
           . tools/ak3-core.sh
-
           split_boot
           if [ -f "split_img/ramdisk.cpio" ]; then
-            unpack_ramdisk
-            write_boot
+              unpack_ramdisk
+              write_boot
           else
-            flash_boot
+              flash_boot
           fi
           EOF
-
-          zip -r9 ../kernel.zip * -x '*.git*'
+          zip -r9 ../kernel-mutan.zip * -x '*.git*'
 
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: kernel
-          path: kernel.zip
+          name: Mutan-Kernel-Release
+          path: kernel-mutan.zip
