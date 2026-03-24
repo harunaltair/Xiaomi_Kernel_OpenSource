@@ -56,13 +56,27 @@ jobs:
       - name: Setup KernelSU Next
         run: |
           set -e
-          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
+          # Clone ke folder sementara dulu
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/ksu_tmp
+          
+          # Cek di mana letak Kconfig yang sebenarnya
+          if [ -f "drivers/ksu_tmp/kernel/Kconfig" ]; then
+            mv drivers/ksu_tmp/kernel drivers/kernelsu-next
+            rm -rf drivers/ksu_tmp
+          else
+            mv drivers/ksu_tmp drivers/kernelsu-next
+          fi
+
+          # Hooking ke Kernel Tree dengan path yang sudah pasti benar
           if ! grep -q "kernelsu-next" drivers/Makefile; then
             echo "obj-y += kernelsu-next/" >> drivers/Makefile
           fi
+          
           if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            echo 'source "drivers/kernelsu-next/Kconfig"' >> drivers/Kconfig
+            # Gunakan sed untuk menyisipkan sebelum endmenu terakhir agar lebih rapi
+            sed -i '$i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig
           fi
+          echo "Integrasi KernelSU Next selesai."
 
       - name: Kernel Config Setup
         run: |
