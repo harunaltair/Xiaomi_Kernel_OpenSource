@@ -166,29 +166,31 @@ jobs:
           cd AK3
 
           cat > anykernel.sh << 'EOF'
-properties() {
-  kernel.string=Mutan-Kernel-A16-NextGen
-  do.devicecheck=1
-  do.modules=0
-  do.systemless=1
-  do.cleanup=1
-  do.cleanuponabort=0
-  device.name1=peridot
-  supported.versions=14 - 16
-}
-block=boot
-is_slot_device=auto
-ramdisk_compression=auto
-patch_vbmeta_flag=auto
-no_magisk_check=1
-. tools/ak3-core.sh
-split_boot
-if [ -f "split_img/ramdisk.cpio" ]; then
-  unpack_ramdisk
-  write_boot
-else
-  flash_boot
-fi
+echo "properties() {" > anykernel.sh
+echo "  kernel.string=Mutan-Kernel-A16-NextGen" >> anykernel.sh
+echo "  do.devicecheck=1" >> anykernel.sh
+echo "  do.modules=0" >> anykernel.sh
+echo "  do.systemless=1" >> anykernel.sh
+echo "  do.cleanup=1" >> anykernel.sh
+echo "  do.cleanuponabort=0" >> anykernel.sh
+echo "  device.name1=peridot" >> anykernel.sh
+echo "  supported.versions=14 - 16" >> anykernel.sh
+echo "}" >> anykernel.sh
+
+echo "block=boot" >> anykernel.sh
+echo "is_slot_device=auto" >> anykernel.sh
+echo "ramdisk_compression=auto" >> anykernel.sh
+echo "patch_vbmeta_flag=auto" >> anykernel.sh
+echo "no_magisk_check=1" >> anykernel.sh
+echo ". tools/ak3-core.sh" >> anykernel.sh
+
+echo "split_boot" >> anykernel.sh
+echo "if [ -f \"split_img/ramdisk.cpio\" ]; then" >> anykernel.sh
+echo "  unpack_ramdisk" >> anykernel.sh
+echo "  write_boot" >> anykernel.sh
+echo "else" >> anykernel.sh
+echo "  flash_boot" >> anykernel.sh
+echo "fi" >> anykernel.sh
 EOF
 
           zip -r9 ../kernel.zip * -x '*.git*'
