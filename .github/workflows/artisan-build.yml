@@ -21,50 +21,51 @@ jobs:
           sudo apt update
           sudo apt install -y bc bison build-essential flex git-core gnupg gperf libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev llvm clang lld libelf-dev
 
-      - name: Setup Toolchain (Azure Clang 18)
+      - name: Setup Toolchain (ZyCromerZ Clang 15)
         run: |
           mkdir -p toolchain
           cd toolchain
-          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/18.0.0-20231231-release/Clang-18.0.0-20231231.tar.gz
-          tar -xf *.tar.gz
-          # Set path toolchain secara permanen untuk sesi ini
+          # Menggunakan link stabil Clang 15.0.7 rilis Februari 2026
+          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208-release.tar.gz
+          tar -xf Clang-15.0.7-20260208-release.tar.gz
           echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
       - name: Setup KernelSU Next
         run: |
-          # Ambil skrip setup KSU Next
+          # Ambil skrip setup KSU Next langsung dari main branch
           curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
           
           # Injeksi config ke defconfig Xiaomi Poco F6
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
-          echo "CONFIG_KSU=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
-          echo "CONFIG_KSU_HIDE_PROCFS=y" >> $DEFCONFIG
-          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_NEXT=y"
+            echo "CONFIG_KSU_HIDE_PROCFS=y"
+            echo "CONFIG_OVERLAY_FS=y"
+          } >> $DEFCONFIG
 
       - name: Artisan Next-Gen Optimizations
         run: |
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
           
-          # 1. Optimasi Performa
+          # 1. Optimasi Performa (O3 & LTO)
           sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
           echo "CONFIG_LTO_CLANG_THIN=y" >> $DEFCONFIG
           
-          # 2. Thermal Tuning (47°C) - Mencari file di folder supply
+          # 2. Thermal Tuning (47°C) - Mencari file di folder power supply
           find drivers/power/supply/ -name "*.c" -exec sed -i 's/450/470/g' {} + || true
           
-          # 3. Disable Debug (Biar kernel ringan)
+          # 3. Disable Debugging untuk meringankan beban CPU
           sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
           echo "CONFIG_DEBUG_INFO=n" >> $DEFCONFIG
 
       - name: Build Kernel Binary
         run: |
-          # Set environment variables untuk kompilasi
+          # Set environment variables untuk kompilasi ZyCromerZ
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
           
-          # Bersihkan output lama
           mkdir -p out
           
           # Langkah 1: Generate Config
@@ -87,14 +88,14 @@ jobs:
       - name: Package with AnyKernel3
         run: |
           if [ -f out/arch/arm64/boot/Image.gz ]; then
-            git clone https://github.com/osm0sis/AnyKernel3.git
+            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
             cp out/arch/arm64/boot/Image.gz AnyKernel3/
             cd AnyKernel3
             sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
             sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
             zip -r ../Artisan-NextGen-Kernel.zip *
           else
-            echo "Kompilasi Gagal: File Image.gz tidak ditemukan di folder out!"
+            echo "Kompilasi Gagal: File Image.gz tidak ditemukan!"
             exit 1
           fi
 
