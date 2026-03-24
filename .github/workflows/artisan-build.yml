@@ -46,27 +46,26 @@ jobs:
 
       - name: Setup KernelSU Next (Enterprise Git Integration)
         run: |
-          set -e # 1. Wajib ada: Pipeline berhenti detik ini juga jika ada error
+          set -e
           
           echo "1. Mengunduh Source KernelSU Next..."
-          # Perbaikan URL ke organisasi resmi & gunakan --depth=1 agar clone super cepat (hemat waktu & bandwidth)
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
           
           echo "2. Melakukan Hooking ke Kernel Tree (Makefile & Kconfig)..."
-          # Mencegah injeksi ganda jika skrip dijalankan ulang
+          
+          # PERBAIKAN: Mengarahkan Makefile ke sub-folder 'kernel/'
           if ! grep -q "kernelsu-next" drivers/Makefile; then
-            echo "obj-y += kernelsu-next/" >> drivers/Makefile
+            echo "obj-y += kernelsu-next/kernel/" >> drivers/Makefile
           fi
           
-          # Wajib disuntikkan agar 'make defconfig' tidak menghapus flag KSU kita
+          # PERBAIKAN: Mengarahkan Kconfig ke sub-folder 'kernel/'
           if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            sed -i '/endmenu/i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig || echo 'source "drivers/kernelsu-next/Kconfig"' >> drivers/Kconfig
+            sed -i '/endmenu/i source "drivers/kernelsu-next/kernel/Kconfig"' drivers/Kconfig || echo 'source "drivers/kernelsu-next/kernel/Kconfig"' >> drivers/Kconfig
           fi
           
           echo "3. Menyuntikkan Konfigurasi KSU secara Aman..."
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
           
-          # Fungsi aman: Hapus config lama (jika ada) sebelum menyuntikkan yang baru
           set_config() {
             local KEY=$1
             local VAL=$2
@@ -79,7 +78,7 @@ jobs:
           set_config "CONFIG_KSU_HIDE_PROCFS" "y"
           set_config "CONFIG_OVERLAY_FS" "y"
           
-          echo "Integrasi Manual KernelSU Next Selesai Tanpa Cacat."
+          echo "Integrasi Manual KernelSU Next dengan Path Terkoreksi Selesai."
 
       - name: Artisan Extreme Gaming & Battery Optimizations
         run: |
