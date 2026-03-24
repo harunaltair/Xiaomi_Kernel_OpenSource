@@ -1,4 +1,4 @@
-name: Build Poco F6 Mutan Kernel
+name: Build Poco F6 Mutan Kernels
 
 on:
   push:
