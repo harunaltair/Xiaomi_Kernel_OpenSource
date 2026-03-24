@@ -9,7 +9,7 @@ jobs:
   build:
     name: Compile Artisan Extreme Kernel
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
@@ -18,91 +18,124 @@ jobs:
           ref: 'peridot-u-oss'
           fetch-depth: 1
 
+      - name: Cache Toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: clang-15.0.7-20230802
+
       - name: Install Build Dependencies
         run: |
           sudo apt update
           sudo apt install -y bc bison build-essential flex git-core gnupg gperf \
           libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev \
-          llvm clang lld libelf-dev
+          llvm clang lld libelf-dev \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
       - name: Setup Toolchain (ZyCromerZ Clang 15)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p toolchain
           cd toolchain
-          # Menggunakan link stabil Clang 15.0.7
-          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz
-          tar -xf Clang-15.0.7-20260208.tar.gz
-          echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
+          # Gunakan tanggal release yang valid (20230802, bukan 20260208)
+          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20230802-release/Clang-15.0.7-20230802.tar.gz
+          tar -xf Clang-15.0.7-20230802.tar.gz
+          rm -f Clang-15.0.7-20230802.tar.gz
+
+      - name: Add Toolchain to PATH
+        run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
       - name: Sanitize Xiaomi OSS Source (Hot-Patch)
         run: |
           set -e
           echo "Memperbaiki referensi Kconfig/Makefile yang rusak dari vendor..."
-          # 1. Hapus referensi Kconfig yang mengarah ke folder hwid yang hilang
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
-          # 2. Hapus referensi Makefile agar compiler tidak mencoba mem-build folder hwid
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
           echo "Sanitasi selesai."
 
-      - name: Setup KernelSU Next (Enterprise Git Integration)
+      - name: Setup KernelSU Next
         run: |
           set -e
-          
+
           echo "1. Mengunduh Source KernelSU Next..."
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
-          
-          echo "2. Melakukan Hooking ke Kernel Tree (Makefile & Kconfig)..."
-          
-          # PERBAIKAN: Mengarahkan Makefile ke sub-folder 'kernel/'
+
+          echo "2. Verifikasi struktur folder KSU..."
+          # Cek apakah subfolder 'kernel/' ada, fallback ke root jika tidak
+          if [ -d "drivers/kernelsu-next/kernel" ]; then
+            KSU_MAKEFILE_PATH="kernelsu-next/kernel/"
+            KSU_KCONFIG_PATH="drivers/kernelsu-next/kernel/Kconfig"
+          else
+            KSU_MAKEFILE_PATH="kernelsu-next/"
+            KSU_KCONFIG_PATH="drivers/kernelsu-next/Kconfig"
+          fi
+          echo "KSU path: $KSU_MAKEFILE_PATH"
+
+          echo "3. Hooking ke Kernel Tree..."
           if ! grep -q "kernelsu-next" drivers/Makefile; then
-            echo "obj-y += kernelsu-next/kernel/" >> drivers/Makefile
+            echo "obj-y += $KSU_MAKEFILE_PATH" >> drivers/Makefile
           fi
-          
-          # PERBAIKAN: Mengarahkan Kconfig ke sub-folder 'kernel/'
+
           if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            sed -i '/endmenu/i source "drivers/kernelsu-next/kernel/Kconfig"' drivers/Kconfig || echo 'source "drivers/kernelsu-next/kernel/Kconfig"' >> drivers/Kconfig
+            sed -i "/endmenu/i source \"$KSU_KCONFIG_PATH\"" drivers/Kconfig || \
+            echo "source \"$KSU_KCONFIG_PATH\"" >> drivers/Kconfig
           fi
-          
-          echo "3. Menyuntikkan Konfigurasi KSU secara Aman..."
+
+          echo "4. Menyuntikkan Konfigurasi KSU..."
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
-          
+
           set_config() {
             local KEY=$1
             local VAL=$2
             sed -i "/$KEY/d" "$DEFCONFIG" || true
             echo "$KEY=$VAL" >> "$DEFCONFIG"
           }
-          
+
           set_config "CONFIG_KSU" "y"
           set_config "CONFIG_KSU_NEXT" "y"
           set_config "CONFIG_KSU_HIDE_PROCFS" "y"
           set_config "CONFIG_OVERLAY_FS" "y"
-          
-          echo "Integrasi Manual KernelSU Next dengan Path Terkoreksi Selesai."
 
-      - name: Artisan Extreme Gaming & Battery Optimizations
+          echo "Integrasi KernelSU Next selesai."
+
+      - name: Artisan Optimizations
         run: |
+          set -e
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
-          
-          # 1. PERFORMANCE TUNING (-O3 & ThinLTO)
+
+          set_config() {
+            local KEY=$1
+            local VAL=$2
+            sed -i "/^$KEY/d" "$DEFCONFIG" || true
+            echo "$KEY=$VAL" >> "$DEFCONFIG"
+          }
+
+          echo "=== 1. Performance (-O3 & ThinLTO) ==="
           sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
-          echo "CONFIG_LTO_CLANG_THIN=y" >> $DEFCONFIG
-          
-          # 2. LOG-STRIP (Anti-Stutter)
+          set_config "CONFIG_LTO_CLANG_THIN" "y"
+
+          echo "=== 2. Debug Strip (AMAN - defconfig only) ==="
+          # FIXED: Tidak lagi menyentuh Makefile dengan sed -g
           sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
-          echo "CONFIG_DEBUG_INFO=n" >> $DEFCONFIG
-          find . -name "Makefile" -exec sed -i 's/-g//g' {} + || true
-          
-          # 3. THERMAL & DEEP SLEEP (Thermal 47°C)
-          find drivers/power/supply/ -name "*.c" -exec sed -i 's/450/470/g' {} + || true
-          {
-            echo "CONFIG_ENERGY_MODEL=y"
-            echo "CONFIG_CPU_IDLE=y"
-            echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
-          } >> $DEFCONFIG
-          
-          # 4. GAMING SCHEDULER
-          echo "CONFIG_SCHED_WALT=y" >> $DEFCONFIG
+          sed -i '/^CONFIG_DEBUG_INFO/d' $DEFCONFIG || true
+          set_config "CONFIG_DEBUG_INFO_NONE" "y"
+          set_config "CONFIG_DEBUG_INFO" "n"
+          set_config "CONFIG_KALLSYMS" "n"
+          set_config "CONFIG_FTRACE" "n"
+
+          echo "=== 3. Power & Thermal ==="
+          # FIXED: Tidak lagi sed pada file .c
+          # Thermal limit diatur lewat defconfig, bukan hardcode ke source C
+          set_config "CONFIG_ENERGY_MODEL" "y"
+          set_config "CONFIG_CPU_IDLE" "y"
+          set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
+
+          echo "=== 4. Gaming Scheduler ==="
+          set_config "CONFIG_SCHED_WALT" "y"
+
+          echo "Optimasi selesai."
 
       - name: Build Kernel Binary
         run: |
@@ -110,33 +143,30 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
-          
+
           mkdir -p out
-          
+
           echo "1. Generate Base Defconfig..."
           make O=out ARCH=arm64 vendor/peridot_user_defconfig
-          
-          echo "2. Update Config untuk Clang 15 (Non-Interactive)..."
-          # SANGAT PENTING: Kita harus memasukkan parameter compiler (LLVM=1 CC=clang) 
-          # DI SINI agar Kconfig tahu kita menggunakan compiler baru dan 
-          # menyetel default konfigurasi tanpa bertanya lagi saat kompilasi utama.
+
+          echo "2. Update Config (Non-Interactive)..."
           make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
-          
-          echo "3. Memulai Kompilasi Utama..."
+
+          echo "3. Kompilasi Utama..."
           make -j$(nproc --all) O=out \
-                      ARCH=arm64 \
-                      LLVM=1 \
-                      CC=clang \
-                      CLANG_TRIPLE=aarch64-linux-gnu- \
-                      CROSS_COMPILE=aarch64-linux-gnu- \
-                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      LD=ld.lld \
-                      AR=llvm-ar \
-                      NM=llvm-nm \
-                      OBJCOPY=llvm-objcopy \
-                      OBJDUMP=llvm-objdump \
-                      STRIP=llvm-strip \
-                      Image.gz
+            ARCH=arm64 \
+            LLVM=1 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            Image.gz
 
       - name: Package with AnyKernel3
         run: |
@@ -147,7 +177,7 @@ jobs:
             cd AnyKernel3
             sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
             sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
-            zip -r ../Artisan-NextGen-Kernel.zip *
+            zip -r9 ../Artisan-NextGen-Kernel.zip * -x '*.git*'
           else
             echo "Build Gagal: Image.gz tidak ditemukan!"
             exit 1
