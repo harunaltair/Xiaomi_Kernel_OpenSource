@@ -141,9 +141,35 @@ jobs:
           set_config "CONFIG_CPU_IDLE" "y"
           set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
 
-          # REMOVED: CONFIG_SCHED_WALT=y
-          # WALT source di branch peridot-u-oss tidak kompatibel dengan headers
-          # kernel ini — menyebabkan error NOHZ_KICK_MASK, nohz_csd, task_group
+          echo "=== 4. PELT Optimization (Pengganti WALT) ==="
+          # PELT sudah native di kernel, tidak perlu source eksternal
+          # WALT dimatikan karena source-nya incomplete di OSS branch ini
+          set_config "CONFIG_SCHED_WALT" "n"
+          set_config "CONFIG_HZ_300" "y"
+          set_config "CONFIG_NO_HZ_IDLE" "y"
+          set_config "CONFIG_NO_HZ_FULL" "n"
+          # PREEMPT_DYNAMIC lebih aman untuk HyperOS 3 (driver Qualcomm tidak semua thread-safe)
+          set_config "CONFIG_PREEMPT_DYNAMIC" "y"
+          set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
+
+          echo "=== 5. Network Optimization ==="
+          set_config "CONFIG_TCP_CONG_BBR" "y"
+          set_config "CONFIG_DEFAULT_TCP_CONG" "bbr"
+          set_config "CONFIG_NET_SCH_FQ" "y"
+          set_config "CONFIG_TCP_ECN" "y"
+          set_config "CONFIG_BPF_SYSCALL" "y"
+
+          echo "=== 6. Memory Optimization ==="
+          set_config "CONFIG_ZRAM_DEF_COMP_LZ4" "y"
+          # KSM dinonaktifkan — Android 16 deprecated + Play Integrity concern
+          set_config "CONFIG_KSM" "n"
+          # ZSWAP dinonaktifkan — konflik dengan HyperMemory milik HyperOS 3
+          set_config "CONFIG_ZSWAP" "n"
+          set_config "CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4" "n"
+
+          echo "=== 7. Security ==="
+          set_config "CONFIG_SECCOMP" "y"
+          set_config "CONFIG_SECCOMP_FILTER" "y"
 
           echo "Optimasi selesai."
 
@@ -178,24 +204,30 @@ jobs:
             STRIP=llvm-strip \
             Image.gz
 
-      - name: Package with AnyKernel3
+      - name: Package with AnyKernel3 (Mutan Edition)
         run: |
           set -e
           if [ -f out/arch/arm64/boot/Image.gz ]; then
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
             cp out/arch/arm64/boot/Image.gz AnyKernel3/
             cd AnyKernel3
+            
+            # Identitas Device
             sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
-            sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
-            zip -r9 ../Artisan-NextGen-Kernel.zip * -x '*.git*'
+            
+            # NAMA YANG MUNCUL DI SETTINGS HP
+            sed -i 's/kernel.string=.*/kernel.string=Mutan-Kernel-A16-NextGen/g' anykernel.sh
+            
+            # NAMA FILE .ZIP HASILNYA
+            zip -r9 ../Mutan-Kernel-Peridot-A16.zip * -x '*.git*'
           else
-            echo "Build Gagal: Image.gz tidak ditemukan!"
+            echo "Build Gagal: Image.gz ga ada, cek log di atas!"
             exit 1
           fi
 
-      - name: Upload Artisan Kernel
+      - name: Upload Mutan Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Artisan-NextGen-Kernel
-          path: Artisan-NextGen-Kernel.zip
+          name: Mutan-Kernel-A16-Package
+          path: Mutan-Kernel-Peridot-A16.zip
           retention-days: 7
