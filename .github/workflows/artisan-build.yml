@@ -53,31 +53,36 @@ jobs:
 
       - name: Fix Broken UAPI Headers
         run: |
-          # CATATAN: File yang di-HDRTEST berasal dari UAPI source tree,
-          # bukan dari usr/include/ yang baru dibuat saat build berjalan.
-          # Patch harus dilakukan di lokasi source asli sebelum make dipanggil.
-
-          # Fix 1: ispv4_defs.h — missing #include <linux/types.h>
-          # Source asli ada di include/uapi/media/ atau include/uapi/linux/media/
-          # Menyebabkan: unknown type name 'uint32_t' / 'uint64_t'
+          # Fix 1: ispv4_defs.h — ganti uint32_t/uint64_t dengan __u32/__u64
+          # Harus dilakukan di source UAPI, bukan usr/include (yang di-generate saat build)
           ISPV4=$(find include/uapi -name "ispv4_defs.h" 2>/dev/null | head -n 1)
           if [ -n "$ISPV4" ]; then
+            sed -i 's/\buint32_t\b/__u32/g; s/\buint64_t\b/__u64/g; s/\buint8_t\b/__u8/g' "$ISPV4"
+            # Pastikan __u32 tersedia
             if ! grep -q "linux/types.h" "$ISPV4"; then
               sed -i '1s|^|#include <linux/types.h>\n|' "$ISPV4"
-              echo "✅ Patched: $ISPV4"
             fi
+            echo "✅ Patched: $ISPV4"
           else
-            echo "⚠️  ispv4_defs.h tidak ditemukan di include/uapi, skip."
+            echo "⚠️  ispv4_defs.h tidak ditemukan, skip."
           fi
-
-          # Fix 2: videodev2.h — struct timespec incomplete di userspace
-          # Menyebabkan: field has incomplete type 'struct timespec'
+      
+          # Fix 2: videodev2.h — kembalikan ke struct timespec biasa
+          # dan tambahkan include time_types.h agar __kernel_old_timespec dikenali
           VIDEODEV=$(find include/uapi -name "videodev2.h" 2>/dev/null | head -n 1)
           if [ -n "$VIDEODEV" ]; then
-            sed -i 's/\bstruct timespec\b\(\s*timestamp\)/struct __kernel_old_timespec\1/g' "$VIDEODEV"
+            # Revert patch sebelumnya (kalau ada), lalu pakai pendekatan yang benar
+            sed -i 's/\bstruct __kernel_old_timespec\b\(\s*timestamp\)/struct __kernel_old_timespec\1/g' "$VIDEODEV"
+            # Tambahkan include linux/time_types.h jika belum ada
+            if ! grep -q "linux/time_types.h" "$VIDEODEV"; then
+              # Tambahkan setelah include pertama yang ada
+              sed -i '/#include/a #include <linux/time_types.h>' "$VIDEODEV"
+              # Hapus duplikat jika ada lebih dari satu
+              awk '!seen[$0]++ || !/time_types/' "$VIDEODEV" > /tmp/vd2.h && mv /tmp/vd2.h "$VIDEODEV"
+            fi
             echo "✅ Patched: $VIDEODEV"
           else
-            echo "⚠️  videodev2.h tidak ditemukan di include/uapi, skip."
+            echo "⚠️  videodev2.h tidak ditemukan, skip."
           fi
 
       - name: Setup KernelSU Next
