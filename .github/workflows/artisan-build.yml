@@ -19,89 +19,84 @@ jobs:
       - name: Install Build Tools
         run: |
           sudo apt update
-          sudo apt install -y bc bison build-essential flex git-core gnupg gperf libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev llvm clang lld
+          sudo apt install -y bc bison build-essential flex git-core gnupg gperf libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev llvm clang lld libelf-dev
 
       - name: Setup Toolchain (Azure Clang 18)
         run: |
-          mkdir toolchain
+          mkdir -p toolchain
           cd toolchain
           curl -LO https://github.com/ZyCromerZ/Clang/releases/download/18.0.0-20231231-release/Clang-18.0.0-20231231.tar.gz
           tar -xf *.tar.gz
-          echo "$(pwd)/bin" >> $GITHUB_PATH
+          # Set path toolchain secara permanen untuk sesi ini
+          echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
       - name: Setup KernelSU Next
         run: |
-          cd $GITHUB_WORKSPACE
-          # Menggunakan repository KernelSU Next (Enhanced Detection Bypass)
+          # Ambil skrip setup KSU Next
           curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
           
-          # Injeksi config KSU Next ke defconfig peridot
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
-          echo "CONFIG_KSU_NEXT=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
-          echo "CONFIG_KSU_HIDE_PROCFS=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
-          echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          # Injeksi config ke defconfig Xiaomi Poco F6
+          DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_NEXT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_HIDE_PROCFS=y" >> $DEFCONFIG
+          echo "CONFIG_OVERLAY_FS=y" >> $DEFCONFIG
 
       - name: Artisan Next-Gen Optimizations
         run: |
-          # 1. AGGRESSIVE PERFORMANCE (-O3 & ThinLTO)
-          # Gunakan '|| true' agar build tidak stop jika baris tidak ditemukan
-          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' arch/arm64/configs/vendor/peridot_user_defconfig || true
-          echo "CONFIG_LTO_CLANG_THIN=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
           
-          # 2. LOG-STRIP (Menghilangkan Micro-stutter)
-          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' arch/arm64/configs/vendor/peridot_user_defconfig || true
-          find . -name "Makefile" -exec sed -i 's/-g//g' {} + || true
+          # 1. Optimasi Performa
+          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
+          echo "CONFIG_LTO_CLANG_THIN=y" >> $DEFCONFIG
           
-          # 3. THERMAL & BATTERY TUNING (Bypass Ready)
-          # Set thermal limit baterai ke 47°C (Mencari di seluruh folder supply)
+          # 2. Thermal Tuning (47°C) - Mencari file di folder supply
           find drivers/power/supply/ -name "*.c" -exec sed -i 's/450/470/g' {} + || true
           
-          # Optimasi Deep Sleep & Power
-          echo "CONFIG_ENERGY_MODEL=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
-          echo "CONFIG_CPU_IDLE=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
-          
-          # 4. GAMING RESPONSE
-          echo "CONFIG_TOUCHSCREEN_COMMON_DUMMY_STP=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
-          echo "CONFIG_SCHED_WALT=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          # 3. Disable Debug (Biar kernel ringan)
+          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
+          echo "CONFIG_DEBUG_INFO=n" >> $DEFCONFIG
 
       - name: Build Kernel Binary
         run: |
+          # Set environment variables untuk kompilasi
           export ARCH=arm64
           export SUBARCH=arm64
-          export CC=clang
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export LD=ld.lld
-          export STRIP=llvm-strip
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
           
-          # Gunakan toolchain yang di-download
-          export CLANG_PATH=$GITHUB_WORKSPACE/toolchain/bin
-          export PATH=$CLANG_PATH:$PATH
+          # Bersihkan output lama
+          mkdir -p out
           
-          make O=out vendor/peridot_user_defconfig
+          # Langkah 1: Generate Config
+          make O=out ARCH=arm64 vendor/peridot_user_defconfig
           
+          # Langkah 2: Proses Kompilasi Utama
           make -j$(nproc --all) O=out \
+                      ARCH=arm64 \
                       CC=clang \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                       LD=ld.lld \
+                      NM=llvm-nm \
+                      OBJCOPY=llvm-objcopy \
+                      OBJDUMP=llvm-objdump \
+                      STRIP=llvm-strip \
                       Image.gz
 
       - name: Package with AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git
-          # Pastikan file Image.gz ada sebelum copy
           if [ -f out/arch/arm64/boot/Image.gz ]; then
+            git clone https://github.com/osm0sis/AnyKernel3.git
             cp out/arch/arm64/boot/Image.gz AnyKernel3/
+            cd AnyKernel3
+            sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
+            sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
+            zip -r ../Artisan-NextGen-Kernel.zip *
           else
-            echo "Error: Image.gz not found!"
+            echo "Kompilasi Gagal: File Image.gz tidak ditemukan di folder out!"
             exit 1
           fi
-          cd AnyKernel3
-          sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
-          sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
-          zip -r ../Artisan-NextGen-Kernel.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
