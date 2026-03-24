@@ -141,8 +141,9 @@ jobs:
           set_config "CONFIG_CPU_IDLE" "y"
           set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
 
-          echo "=== 4. Gaming Scheduler ==="
-          set_config "CONFIG_SCHED_WALT" "y"
+          # REMOVED: CONFIG_SCHED_WALT=y
+          # WALT source di branch peridot-u-oss tidak kompatibel dengan headers
+          # kernel ini — menyebabkan error NOHZ_KICK_MASK, nohz_csd, task_group
 
           echo "Optimasi selesai."
 
