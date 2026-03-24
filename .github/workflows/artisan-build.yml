@@ -144,34 +144,35 @@ jobs:
           fi
 
       # =========================================================
-      # [7] SETUP KERNELSU NEXT
+      # [7] INTEGRASI KERNELSU NEXT (FIXED FOR REALKING BASE)
       # =========================================================
       - name: Setup KernelSU Next
         run: |
           set -e
+          echo "Membersihkan sisa-sisa KSU lama untuk mencegah konflik..."
+          # 1. Hapus folder KSU lama jika ada
+          rm -rf drivers/kernelsu drivers/kernelsu-next
+          
+          # 2. Hapus referensi Kconfig lama di drivers/Kconfig agar tidak double/broken
+          # Ini kunci untuk memperbaiki error "can't open file"
+          sed -i '/kernelsu/d' drivers/Kconfig
+          sed -i '/kernelsu-next/d' drivers/Kconfig
+
+          # 3. Clone KernelSU Next
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
-
+          
+          # 4. Handle struktur folder (Next version sering punya subfolder 'kernel')
           if [ -d "drivers/kernelsu-next/kernel" ]; then
-            cd drivers/kernelsu-next
-            mv kernel/* . 2>/dev/null || true
-            rm -rf kernel
-            cd ../..
+            mv drivers/kernelsu-next/kernel/* drivers/kernelsu-next/
+            rm -rf drivers/kernelsu-next/kernel
           fi
 
-          if [ ! -f "drivers/kernelsu-next/Kconfig" ]; then
-            echo "❌ KernelSU-Next Kconfig tidak ditemukan setelah setup!"
-            ls -la drivers/kernelsu-next/
-            exit 1
-          fi
-
-          if ! grep -q "kernelsu-next" drivers/Makefile; then
-            echo "obj-y += kernelsu-next/" >> drivers/Makefile
-          fi
-          if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            sed -i '$i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig
-          fi
-
-          echo "✅ KernelSU Next setup selesai"
+          # 5. Suntikkan ulang secara bersih ke Makefile & Kconfig
+          echo "obj-y += kernelsu-next/" >> drivers/Makefile
+          # Gunakan perintah 'sed' untuk menyisipkan sebelum baris terakhir 'endmenu'
+          sed -i '/endmenu/i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig
+          
+          echo "✅ KernelSU Next terpasang secara bersih."
 
       # =========================================================
       # [8] KERNEL CONFIG SETUP
