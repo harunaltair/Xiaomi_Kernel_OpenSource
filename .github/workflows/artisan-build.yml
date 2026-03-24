@@ -44,17 +44,42 @@ jobs:
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
           echo "Sanitasi selesai."
 
-      - name: Setup KernelSU Next
+      - name: Setup KernelSU Next (Enterprise Git Integration)
         run: |
-          set -e
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          set -e # 1. Wajib ada: Pipeline berhenti detik ini juga jika ada error
+          
+          echo "1. Mengunduh Source KernelSU Next..."
+          # Perbaikan URL ke organisasi resmi & gunakan --depth=1 agar clone super cepat (hemat waktu & bandwidth)
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
+          
+          echo "2. Melakukan Hooking ke Kernel Tree (Makefile & Kconfig)..."
+          # Mencegah injeksi ganda jika skrip dijalankan ulang
+          if ! grep -q "kernelsu-next" drivers/Makefile; then
+            echo "obj-y += kernelsu-next/" >> drivers/Makefile
+          fi
+          
+          # Wajib disuntikkan agar 'make defconfig' tidak menghapus flag KSU kita
+          if ! grep -q "kernelsu-next" drivers/Kconfig; then
+            sed -i '/endmenu/i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig || echo 'source "drivers/kernelsu-next/Kconfig"' >> drivers/Kconfig
+          fi
+          
+          echo "3. Menyuntikkan Konfigurasi KSU secara Aman..."
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
-          {
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_NEXT=y"
-            echo "CONFIG_KSU_HIDE_PROCFS=y"
-            echo "CONFIG_OVERLAY_FS=y"
-          } >> $DEFCONFIG
+          
+          # Fungsi aman: Hapus config lama (jika ada) sebelum menyuntikkan yang baru
+          set_config() {
+            local KEY=$1
+            local VAL=$2
+            sed -i "/$KEY/d" "$DEFCONFIG" || true
+            echo "$KEY=$VAL" >> "$DEFCONFIG"
+          }
+          
+          set_config "CONFIG_KSU" "y"
+          set_config "CONFIG_KSU_NEXT" "y"
+          set_config "CONFIG_KSU_HIDE_PROCFS" "y"
+          set_config "CONFIG_OVERLAY_FS" "y"
+          
+          echo "Integrasi Manual KernelSU Next Selesai Tanpa Cacat."
 
       - name: Artisan Extreme Gaming & Battery Optimizations
         run: |
