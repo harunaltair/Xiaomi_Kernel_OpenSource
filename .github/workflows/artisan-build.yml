@@ -113,23 +113,16 @@ jobs:
           
           mkdir -p out
           
-          echo "1. Memperbaiki Typo OEM Xiaomi..."
-          # Terkadang ada typo di Makefile utama atau Kbuild yang membuat 'asm-generic' menjadi 'asmeneric'
-          # Kita gunakan find untuk mencari file yang mengandung string cacat ini dan memperbaikinya
-          find . -type f -name "Makefile*" -exec sed -i 's/asmeneric/asm-generic/g' {} + || true
-          
-          echo "2. Generate Base Defconfig..."
-          # Perintah make defconfig standar
+          echo "1. Generate Base Defconfig..."
           make O=out ARCH=arm64 vendor/peridot_user_defconfig
           
-          echo "3. Update Config untuk Compiler Baru (Non-Interactive)..."
-          # 'make olddefconfig' adalah kunci utama di CI/CD. 
-          # Perintah ini akan otomatis mengisi semua konfigurasi baru (yang ditanyakan Clang) 
-          # dengan nilai DEFAULT-nya, tanpa membekukan pipeline.
-          make O=out ARCH=arm64 olddefconfig
+          echo "2. Update Config untuk Clang 15 (Non-Interactive)..."
+          # SANGAT PENTING: Kita harus memasukkan parameter compiler (LLVM=1 CC=clang) 
+          # DI SINI agar Kconfig tahu kita menggunakan compiler baru dan 
+          # menyetel default konfigurasi tanpa bertanya lagi saat kompilasi utama.
+          make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
           
-          echo "4. Memulai Kompilasi Utama..."
-          # Menambahkan LLVM=1 sangat direkomendasikan saat menggunakan Clang modern
+          echo "3. Memulai Kompilasi Utama..."
           make -j$(nproc --all) O=out \
                       ARCH=arm64 \
                       LLVM=1 \
@@ -138,6 +131,7 @@ jobs:
                       CROSS_COMPILE=aarch64-linux-gnu- \
                       CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                       LD=ld.lld \
+                      AR=llvm-ar \
                       NM=llvm-nm \
                       OBJCOPY=llvm-objcopy \
                       OBJDUMP=llvm-objdump \
