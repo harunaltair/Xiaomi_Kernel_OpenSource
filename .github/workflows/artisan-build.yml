@@ -1,0 +1,94 @@
+name: Build Poco F6 Next-Gen Artisan Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: 'MiCode/Xiaomi_Kernel_OpenSource'
+          ref: 'peridot-u-oss'
+          fetch-depth: 1
+
+      - name: Install Build Tools
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex git-core gnupg gperf libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev llvm clang lld
+
+      - name: Setup Toolchain (Azure Clang 18)
+        run: |
+          mkdir toolchain
+          cd toolchain
+          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/18.0.0-20231231-release/Clang-18.0.0-20231231.tar.gz
+          tar -xf *.tar.gz
+          echo "$(pwd)/bin" >> $GITHUB_PATH
+
+      - name: Setup KernelSU Next
+        run: |
+          # Menggunakan repository KernelSU Next (Enhanced Detection Bypass)
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          # Injeksi config KSU Next & Anti-Detection
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          echo "CONFIG_KSU_NEXT=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          echo "CONFIG_KSU_HIDE_PROCFS=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+
+      - name: Artisan Next-Gen Optimizations
+        run: |
+          # 1. AGGRESSIVE PERFORMANCE (-O3 & ThinLTO)
+          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' arch/arm64/configs/vendor/peridot_user_defconfig
+          echo "CONFIG_LTO_CLANG_THIN=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          
+          # 2. LOG-STRIP (Menghilangkan Micro-stutter)
+          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' arch/arm64/configs/vendor/peridot_user_defconfig
+          find . -name "Makefile" -exec sed -i 's/-g//g' {} +
+          
+          # 3. THERMAL & BATTERY TUNING (Bypass Ready)
+          # Set thermal limit baterai ke 47°C (Balance Artisan)
+          find drivers/power/supply/qcom/ -name "*.c" -exec sed -i 's/450/470/g' {} +
+          # Aktifkan Energy Model & Deep Sleep Optimizations
+          echo "CONFIG_ENERGY_MODEL=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          echo "CONFIG_CPU_IDLE=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          
+          # 4. GAMING RESPONSE (Touch & Boost)
+          echo "CONFIG_TOUCHSCREEN_COMMON_DUMMY_STP=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+          echo "CONFIG_SCHED_WALT=y" >> arch/arm64/configs/vendor/peridot_user_defconfig
+
+      - name: Build Kernel Binary
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export LD=ld.lld
+          export STRIP=llvm-strip
+          
+          make O=out vendor/peridot_user_defconfig
+          
+          make -j$(nproc --all) O=out \
+                      CC=clang \
+                      CLANG_TRIPLE=aarch64-linux-gnu- \
+                      CROSS_COMPILE=aarch64-linux-gnu- \
+                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+                      LD=ld.lld \
+                      Image.gz
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/
+          cd AnyKernel3
+          sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
+          sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
+          zip -r ../Artisan-NextGen-Kernel.zip *
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Artisan-NextGen-Kernel
+          path: Artisan-NextGen-Kernel.zip
