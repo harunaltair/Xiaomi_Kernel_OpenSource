@@ -48,21 +48,19 @@ jobs:
       - name: Sanitize Xiaomi OSS Source
         run: |
           set -e
-          echo "Membersihkan referensi hwid yang rusak..."
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
-          echo "Sanitasi selesai."
 
       - name: Setup KernelSU Next
         run: |
           set -e
-          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/ksu_tmp
-          if [ -f "drivers/ksu_tmp/kernel/Kconfig" ]; then
-            mv drivers/ksu_tmp/kernel drivers/kernelsu-next
-            rm -rf drivers/ksu_tmp
-          else
-            mv drivers/ksu_tmp drivers/kernelsu-next
+          git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
+          
+          # Logic pemindahan folder yang lebih robust
+          if [ -d "drivers/kernelsu-next/kernel" ]; then
+            cd drivers/kernelsu-next && mv kernel/* . && rm -rf kernel && cd ../..
           fi
+
           if ! grep -q "kernelsu-next" drivers/Makefile; then
             echo "obj-y += kernelsu-next/" >> drivers/Makefile
           fi
@@ -73,65 +71,55 @@ jobs:
       - name: Kernel Config Setup
         run: |
           set -e
-          DEFCONFIG="arch/arm64/configs/gki_defconfig"
-          if [ ! -f "$DEFCONFIG" ]; then
-            DEFCONFIG="arch/arm64/configs/vendor/gki_defconfig"
+          # PRIORITAS: Gunakan defconfig spesifik vendor jika ada, atau GKI sebagai fallback
+          if [ -f "arch/arm64/configs/vendor/peridot_user_defconfig" ]; then
+            CONF="vendor/peridot_user_defconfig"
+          elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
+            CONF="gki_defconfig"
+          else
+            CONF=$(find arch/arm64/configs/ -name "*peridot*" | head -n 1 | sed 's|arch/arm64/configs/||')
           fi
-          echo "TARGET_DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
+          
+          echo "TARGET_DEFCONFIG=$CONF" >> $GITHUB_ENV
+          DEFCONFIG="arch/arm64/configs/$CONF"
 
           set_config() {
-            sed -i "/^$1/d" $DEFCONFIG || true
-            echo "$1=$2" >> $DEFCONFIG
+            sed -i "/^$1/d" "$DEFCONFIG" || true
+            echo "$1=$2" >> "$DEFCONFIG"
           }
 
-          # --- FIX BPF VERIFIER & STACK LIMIT ---
-          set_config CONFIG_FRAME_WARN 2560
+          # --- FIX COMPILATION ERRORS ---
+          set_config CONFIG_FRAME_WARN 2048
           set_config CONFIG_WERROR n
-
-          # --- FIX ERROR 2: DISABLE TRACING ---
           set_config CONFIG_FTRACE n
           set_config CONFIG_TRACING n
-          set_config CONFIG_FUNCTION_TRACER n
-          set_config CONFIG_STACK_TRACER n
-          set_config CONFIG_DYNAMIC_FTRACE n
 
-          # Core Features
+          # --- CORE FEATURES & OPTIMIZATION ---
           set_config CONFIG_KSU y
           set_config CONFIG_KSU_NEXT y
-          set_config CONFIG_KSU_HIDE_PROCFS y
           set_config CONFIG_OVERLAY_FS y
           set_config CONFIG_LTO_CLANG_THIN y
-          
-          # Networking & Performance
-          set_config CONFIG_TCP_CONG_BBR y
-          set_config CONFIG_DEFAULT_TCP_CONG bbr
-          set_config CONFIG_NET_SCH_FQ y
           set_config CONFIG_HZ_300 y
-          set_config CONFIG_BPF_SYSCALL y
+          set_config CONFIG_TCP_CONG_BBR y
+          set_config CONFIG_DEFAULT_TCP_CONG \"bbr\"
           set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
 
       - name: Build Kernel
         run: |
           set -e
           export ARCH=arm64
-          export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
           
           rm -rf out && mkdir -p out
           
-          DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
-          make O=out ARCH=arm64 $DEFCONFIG_BASENAME
+          make O=out ARCH=arm64 $TARGET_DEFCONFIG
           
-          # Pastikan config baru diterapkan tanpa hambatan
-          make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
-          
+          # Menggunakan LLVM_IAS=1 untuk stabilitas assembler modern
           make -j$(nproc --all) O=out \
-            ARCH=arm64 LLVM=1 CC=clang \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             Image.gz 2>&1 | tee build.log
 
       - name: Upload Build Log
@@ -145,15 +133,17 @@ jobs:
         run: |
           set -e
           if [ ! -f out/arch/arm64/boot/Image.gz ]; then
-            echo "❌ Build Gagal: Image.gz tidak ditemukan di folder out"
+            echo "❌ Build Gagal: Image.gz tidak ditemukan!"
             exit 1
           fi
+          
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
           cp out/arch/arm64/boot/Image.gz AK3/
           cd AK3
           
+          # FIX: Syntax AnyKernel3 membutuhkan tanda petik tunggal pada properties
           cat > anykernel.sh << 'EOF'
-          properties() {
+          properties() { '
           kernel.string=Mutan-Kernel-A16-NextGen
           do.devicecheck=1
           do.modules=0
@@ -162,19 +152,19 @@ jobs:
           do.cleanuponabort=0
           device.name1=peridot
           supported.versions=14 - 16
-          }
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          no_magisk_check=1
-          . tools/ak3-core.sh
-          split_boot
+          '; }
+          block=boot;
+          is_slot_device=auto;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          no_magisk_check=1;
+          . tools/ak3-core.sh;
+          split_boot;
           if [ -f "split_img/ramdisk.cpio" ]; then
-              unpack_ramdisk
-              write_boot
+              unpack_ramdisk;
+              write_boot;
           else
-              flash_boot
+              flash_boot;
           fi
           EOF
           zip -r9 ../kernel-mutan.zip * -x '*.git*'
