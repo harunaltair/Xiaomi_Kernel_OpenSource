@@ -149,6 +149,10 @@ jobs:
           set_config "CONFIG_SECCOMP" "y"
           set_config "CONFIG_TMPFS_XATTR" "y"
 
+          # 8. Bypass Stack Frame Warning akibat optimasi -O3
+          set_config "CONFIG_FRAME_WARN" "4096"
+          # Atau jika 4096 masih kurang, gunakan "8192" atau "0" untuk disable.
+
       # ---------------------------------------------------------
       # PATCHING
       # ---------------------------------------------------------
