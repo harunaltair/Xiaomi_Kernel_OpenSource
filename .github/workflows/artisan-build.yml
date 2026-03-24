@@ -18,6 +18,9 @@ jobs:
           ref: 'peridot-u-oss'
           fetch-depth: 1
 
+      # ---------------------------------------------------------
+      # PRAKTIK TERBAIK: Caching Toolchain untuk mempercepat CI/CD
+      # ---------------------------------------------------------
       - name: Cache Toolchain
         id: cache-toolchain
         uses: actions/cache@v4
@@ -38,44 +41,33 @@ jobs:
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p toolchain && cd toolchain
-
-          curl -L \
-            --retry 3 \
-            --retry-delay 5 \
-            -o clang.tar.gz \
-            "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
-
+          curl -L --retry 3 --retry-delay 5 -o clang.tar.gz "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
           FILESIZE=$(stat -c%s clang.tar.gz)
-          echo "Downloaded: $FILESIZE bytes"
           if [ "$FILESIZE" -lt 1000000 ]; then
-            echo "ERROR: Download gagal, isi file:"
-            cat clang.tar.gz
+            echo "ERROR: Download gagal."
             exit 1
           fi
-
           tar -xf clang.tar.gz
           rm -f clang.tar.gz
-          echo "Clang ready: $(bin/clang --version | head -1)"
 
       - name: Add Toolchain to PATH
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
+      # ---------------------------------------------------------
+      # SANITASI & INTEGRASI SISTEM (Hot-Patching Vendor Code)
+      # ---------------------------------------------------------
       - name: Sanitize Xiaomi OSS Source (Hot-Patch)
         run: |
           set -e
           echo "Memperbaiki referensi Kconfig/Makefile yang rusak dari vendor..."
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
-          echo "Sanitasi selesai."
 
       - name: Setup KernelSU Next
         run: |
           set -e
-
-          echo "1. Mengunduh Source KernelSU Next..."
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
-
-          echo "2. Verifikasi struktur folder KSU..."
+          
           if [ -d "drivers/kernelsu-next/kernel" ]; then
             KSU_MAKEFILE_PATH="kernelsu-next/kernel/"
             KSU_KCONFIG_PATH="drivers/kernelsu-next/kernel/Kconfig"
@@ -83,21 +75,23 @@ jobs:
             KSU_MAKEFILE_PATH="kernelsu-next/"
             KSU_KCONFIG_PATH="drivers/kernelsu-next/Kconfig"
           fi
-          echo "KSU path: $KSU_MAKEFILE_PATH"
-
-          echo "3. Hooking ke Kernel Tree..."
+          
           if ! grep -q "kernelsu-next" drivers/Makefile; then
             echo "obj-y += $KSU_MAKEFILE_PATH" >> drivers/Makefile
           fi
-
           if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            sed -i "/endmenu/i source \"$KSU_KCONFIG_PATH\"" drivers/Kconfig || \
-            echo "source \"$KSU_KCONFIG_PATH\"" >> drivers/Kconfig
+            sed -i "/endmenu/i source \"$KSU_KCONFIG_PATH\"" drivers/Kconfig || echo "source \"$KSU_KCONFIG_PATH\"" >> drivers/Kconfig
           fi
 
-          echo "4. Menyuntikkan Konfigurasi KSU..."
+      # ---------------------------------------------------------
+      # MANAJEMEN KONFIGURASI (Feature Toggles & Optimizations)
+      # ---------------------------------------------------------
+      - name: Artisan Optimizations & New Features
+        run: |
+          set -e
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
 
+          # Helper function agar injeksi config konsisten dan idempoten
           set_config() {
             local KEY=$1
             local VAL=$2
@@ -105,30 +99,17 @@ jobs:
             echo "$KEY=$VAL" >> "$DEFCONFIG"
           }
 
+          # 1. KSU & OverlayFS
           set_config "CONFIG_KSU" "y"
           set_config "CONFIG_KSU_NEXT" "y"
           set_config "CONFIG_KSU_HIDE_PROCFS" "y"
           set_config "CONFIG_OVERLAY_FS" "y"
 
-          echo "Integrasi KernelSU Next selesai."
-
-      - name: Artisan Optimizations
-        run: |
-          set -e
-          DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
-
-          set_config() {
-            local KEY=$1
-            local VAL=$2
-            sed -i "/^$KEY/d" "$DEFCONFIG" || true
-            echo "$KEY=$VAL" >> "$DEFCONFIG"
-          }
-
-          echo "=== 1. Performance (-O3 & ThinLTO) ==="
+          # 2. Performance (-O3 & ThinLTO)
           sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
           set_config "CONFIG_LTO_CLANG_THIN" "y"
 
-          echo "=== 2. Debug Strip (defconfig only) ==="
+          # 3. Debug Strip (Mengurangi ukuran kernel secara signifikan)
           sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
           sed -i '/^CONFIG_DEBUG_INFO/d' $DEFCONFIG || true
           set_config "CONFIG_DEBUG_INFO_NONE" "y"
@@ -136,43 +117,64 @@ jobs:
           set_config "CONFIG_KALLSYMS" "n"
           set_config "CONFIG_FTRACE" "n"
 
-          echo "=== 3. Power & Thermal ==="
+          # 4. Power & Thermal (Mendukung deep sleep optimization)
           set_config "CONFIG_ENERGY_MODEL" "y"
           set_config "CONFIG_CPU_IDLE" "y"
           set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
 
-          echo "=== 4. PELT Optimization (Pengganti WALT) ==="
-          # PELT sudah native di kernel, tidak perlu source eksternal
-          # WALT dimatikan karena source-nya incomplete di OSS branch ini
+          # 5. PELT Optimization
           set_config "CONFIG_SCHED_WALT" "n"
           set_config "CONFIG_HZ_300" "y"
           set_config "CONFIG_NO_HZ_IDLE" "y"
-          set_config "CONFIG_NO_HZ_FULL" "n"
-          # PREEMPT_DYNAMIC lebih aman untuk HyperOS 3 (driver Qualcomm tidak semua thread-safe)
           set_config "CONFIG_PREEMPT_DYNAMIC" "y"
-          set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
 
-          echo "=== 5. Network Optimization ==="
+          # 6. Network Optimization (Termasuk TCP Latency dari update dev lain)
           set_config "CONFIG_TCP_CONG_BBR" "y"
           set_config "CONFIG_DEFAULT_TCP_CONG" "bbr"
           set_config "CONFIG_NET_SCH_FQ" "y"
           set_config "CONFIG_TCP_ECN" "y"
           set_config "CONFIG_BPF_SYSCALL" "y"
+          set_config "CONFIG_NET_RX_BUSY_POLL" "y" # Mengurangi latensi network
+          set_config "CONFIG_BQL" "y"            # Byte Queue Limits (mendukung BBG/BBR)
 
-          echo "=== 6. Memory Optimization ==="
+          # 7. Memory Optimization (SLUB Harden & Kompresi)
           set_config "CONFIG_ZRAM_DEF_COMP_LZ4" "y"
-          # KSM dinonaktifkan — Android 16 deprecated + Play Integrity concern
           set_config "CONFIG_KSM" "n"
-          # ZSWAP dinonaktifkan — konflik dengan HyperMemory milik HyperOS 3
           set_config "CONFIG_ZSWAP" "n"
-          set_config "CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4" "n"
+          set_config "CONFIG_SLUB_CPU_PARTIAL" "y"
+          set_config "CONFIG_SLAB_FREELIST_RANDOM" "y"
+          set_config "CONFIG_SLAB_FREELIST_HARDENED" "y"
 
-          echo "=== 7. Security ==="
+          # 8. Security & TMPFS XATTR (Support Modding Lanjutan)
           set_config "CONFIG_SECCOMP" "y"
           set_config "CONFIG_SECCOMP_FILTER" "y"
+          set_config "CONFIG_TMPFS_XATTR" "y"
+          set_config "CONFIG_TMPFS_POSIX_ACL" "y"
 
-          echo "Optimasi selesai."
+      # ---------------------------------------------------------
+      # KONTROL VERSI PATCH (Menghindari Spaghetti Code)
+      # ---------------------------------------------------------
+      - name: Apply Wild Kernel Patches (Source Modifications)
+        run: |
+          set -e
+          echo "Menerapkan patch BBG dan optimasi Wakeup..."
+          
+          # CATATAN ARSITEKTUR: Jika ada patch dari dev lain berupa modifikasi source (.c atau .h),
+          # simpan file .patch tersebut di dalam folder 'patches/' di repository GitHub Anda.
+          # Sistem akan secara otomatis mengaplikasikannya di sini sebelum kompilasi.
+          
+          if [ -d "$GITHUB_WORKSPACE/patches" ]; then
+            for patch in $GITHUB_WORKSPACE/patches/*.patch; do
+              echo "Applying $patch..."
+              patch -p1 < "$patch" || echo "Peringatan: Gagal menerapkan $patch, melanjutkan..."
+            done
+          else
+            echo "Folder 'patches/' tidak ditemukan, melewati tahap patching."
+          fi
 
+      # ---------------------------------------------------------
+      # KOMPILASI UTAMA
+      # ---------------------------------------------------------
       - name: Build Kernel Binary
         run: |
           set -e
@@ -182,13 +184,14 @@ jobs:
 
           mkdir -p out
 
-          echo "1. Generate Base Defconfig..."
+          echo "Generate Base Defconfig..."
           make O=out ARCH=arm64 vendor/peridot_user_defconfig
 
-          echo "2. Update Config (Non-Interactive)..."
+          echo "Update Config..."
           make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
 
-          echo "3. Kompilasi Utama..."
+          echo "Kompilasi Utama..."
+          # Pastikan menghasilkan target Image dan Image.gz secara eksplisit
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             LLVM=1 \
@@ -202,26 +205,56 @@ jobs:
             OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
-            Image.gz
+            Image Image.gz
 
+      # ---------------------------------------------------------
+      # PACKAGING DINAMIS (Mengatasi Issue 'Failed Busybox')
+      # ---------------------------------------------------------
       - name: Package with AnyKernel3 (Mutan Edition)
         run: |
           set -e
           if [ -f out/arch/arm64/boot/Image.gz ]; then
-            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-            cp out/arch/arm64/boot/Image.gz AnyKernel3/
-            cd AnyKernel3
+            echo "Menyiapkan AnyKernel3..."
+            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3-Mutan
             
-            # Identitas Device
-            sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
+            cp out/arch/arm64/boot/Image.gz AK3-Mutan/
             
-            # NAMA YANG MUNCUL DI SETTINGS HP
-            sed -i 's/kernel.string=.*/kernel.string=Mutan-Kernel-A16-NextGen/g' anykernel.sh
+            cd AK3-Mutan
+            rm -f anykernel.sh
             
-            # NAMA FILE .ZIP HASILNYA
+            # Injeksi file anykernel.sh yang bersih dan modern (GKI Compliant)
+            cat << 'EOF' > anykernel.sh
+            properties() { '
+            kernel.string=Mutan-Kernel-A16-NextGen
+            do.devicecheck=1
+            do.modules=0
+            do.systemless=1
+            do.cleanup=1
+            do.cleanuponabort=0
+            device.name1=peridot
+            supported.versions=14 - 16
+            '; }
+            block=boot
+            is_slot_device=auto
+            ramdisk_compression=auto
+            patch_vbmeta_flag=auto
+            no_magisk_check=1
+            
+            . tools/ak3-core.sh
+            
+            split_boot
+            if [ -f "split_img/ramdisk.cpio" ]; then
+                unpack_ramdisk
+                write_boot
+            else
+                flash_boot
+            fi
+            EOF
+
+            echo "Membuat file ZIP..."
             zip -r9 ../Mutan-Kernel-Peridot-A16.zip * -x '*.git*'
           else
-            echo "Build Gagal: Image.gz ga ada, cek log di atas!"
+            echo "Build Gagal: Binary kernel (Image.gz) tidak ditemukan!"
             exit 1
           fi
 
