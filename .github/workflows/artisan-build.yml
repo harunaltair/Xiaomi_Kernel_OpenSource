@@ -20,94 +20,71 @@ jobs:
 
       - name: Install Build Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git-core gnupg gperf \
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex git-core gnupg gperf \
           libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev \
           llvm clang lld libelf-dev
 
-      - name: Cache Static Toolchain
-        id: cache-toolchain
-        uses: actions/cache@v4
-        with:
-          path: toolchain-dir
-          key: ${{ runner.os }}-clang-zycromerz-15.0.7
-
       - name: Setup Toolchain (ZyCromerZ Clang 15)
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain
+          cd toolchain
+          # Menggunakan link stabil Clang 15.0.7
+          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz
+          tar -xf Clang-15.0.7-20260208.tar.gz
+          echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
+
+      - name: Sanitize Xiaomi OSS Source (Hot-Patch)
         run: |
           set -e
-          mkdir -p toolchain-dir
-          # Jangan cd, tetap di workspace agar struktur path aman
-          TOOLCHAIN_URL="https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
-          
-          if ! curl -fSLO "$TOOLCHAIN_URL"; then
-            echo "::error::Gagal mengunduh Toolchain."
-            exit 1
-          fi
-          
-          # Ekstrak langsung ke dalam direktori dan buang arsip
-          tar -xzf Clang-15.0.7-20260208.tar.gz -C toolchain-dir
-          rm *.tar.gz
-
-      - name: Export Toolchain Path
-        run: |
-          # Cari direktori bin yang sebenarnya (mengantisipasi struktur subfolder)
-          BIN_PATH=$(find $GITHUB_WORKSPACE/toolchain-dir -type d -name "bin" | head -n 1)
-          if [ -z "$BIN_PATH" ]; then
-            echo "::error::Direktori bin pada toolchain tidak ditemukan!"
-            exit 1
-          fi
-          echo "$BIN_PATH" >> $GITHUB_PATH
-          echo "Toolchain Path terdaftar: $BIN_PATH"
+          echo "Memperbaiki referensi Kconfig/Makefile yang rusak dari vendor..."
+          # 1. Hapus referensi Kconfig yang mengarah ke folder hwid yang hilang
+          sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
+          # 2. Hapus referensi Makefile agar compiler tidak mencoba mem-build folder hwid
+          sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
+          echo "Sanitasi selesai."
 
       - name: Setup KernelSU Next
         run: |
           set -e
-          curl -fLSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/main/kernel/setup.sh" | bash -s main
+          DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_NEXT=y"
+            echo "CONFIG_KSU_HIDE_PROCFS=y"
+            echo "CONFIG_OVERLAY_FS=y"
+          } >> $DEFCONFIG
 
-      - name: Artisan Extreme Optimization Configs
+      - name: Artisan Extreme Gaming & Battery Optimizations
         run: |
-          set -e
           DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
           
-          # Fungsi aman untuk menginjeksi atau memperbarui config
-          set_config() {
-            local KEY=$1
-            local VAL=$2
-            sed -i "/$KEY/d" "$DEFCONFIG" || true # Hapus jika sudah ada (mencegah duplikasi/konflik)
-            echo "$KEY=$VAL" >> "$DEFCONFIG"
-          }
+          # 1. PERFORMANCE TUNING (-O3 & ThinLTO)
+          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
+          echo "CONFIG_LTO_CLANG_THIN=y" >> $DEFCONFIG
           
-          # --- KSU Next ---
-          set_config "CONFIG_KSU" "y"
-          set_config "CONFIG_KSU_NEXT" "y"
-          set_config "CONFIG_KSU_HIDE_PROCFS" "y"
-          set_config "CONFIG_OVERLAY_FS" "y"
+          # 2. LOG-STRIP (Anti-Stutter)
+          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
+          echo "CONFIG_DEBUG_INFO=n" >> $DEFCONFIG
+          find . -name "Makefile" -exec sed -i 's/-g//g' {} + || true
           
-          # --- Performance (O3 & LTO) ---
-          set_config "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE" "y" # Pastikan base flag aktif
-          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' "$DEFCONFIG" || true
-          set_config "CONFIG_LTO_CLANG_THIN" "y"
+          # 3. THERMAL & DEEP SLEEP (Thermal 47°C)
+          find drivers/power/supply/ -name "*.c" -exec sed -i 's/450/470/g' {} + || true
+          {
+            echo "CONFIG_ENERGY_MODEL=y"
+            echo "CONFIG_CPU_IDLE=y"
+            echo "CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y"
+          } >> $DEFCONFIG
           
-          # --- Anti-Stutter (Disable Debug) ---
-          set_config "CONFIG_DEBUG_KERNEL" "n"
-          set_config "CONFIG_DEBUG_INFO" "n"
-          
-          # --- Power Management & Sched ---
-          set_config "CONFIG_ENERGY_MODEL" "y"
-          set_config "CONFIG_CPU_IDLE" "y"
-          set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
-          set_config "CONFIG_SCHED_WALT" "y"
-          
-          # Thermal Tuning (Aman jika tidak ditemukan)
-          find drivers/power/supply/ -name "*.c" -type f -exec sed -i 's/450/470/g' {} + || true
+          # 4. GAMING SCHEDULER
+          echo "CONFIG_SCHED_WALT=y" >> $DEFCONFIG
 
       - name: Build Kernel Binary
         run: |
-          set -e
           export ARCH=arm64
           export SUBARCH=arm64
-          # Path toolchain sudah di-export secara global di step sebelumnya
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
           
           mkdir -p out
           make O=out ARCH=arm64 vendor/peridot_user_defconfig
@@ -133,17 +110,16 @@ jobs:
             cp out/arch/arm64/boot/Image.gz AnyKernel3/
             cd AnyKernel3
             sed -i 's/device.name1=.*/device.name1=peridot/g' anykernel.sh
-            sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-Extreme/g' anykernel.sh
-            rm -rf .git
-            zip -r9 ../Artisan-Extreme-Kernel.zip *
+            sed -i 's/kernel.string=.*/kernel.string=Artisan-NextGen-PocoF6/g' anykernel.sh
+            zip -r ../Artisan-NextGen-Kernel.zip *
           else
-            echo "::error::Build Gagal: Image.gz tidak ditemukan!"
+            echo "Build Gagal: Image.gz tidak ditemukan!"
             exit 1
           fi
 
       - name: Upload Artisan Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Artisan-Extreme-Kernel
-          path: Artisan-Extreme-Kernel.zip
+          name: Artisan-NextGen-Kernel
+          path: Artisan-NextGen-Kernel.zip
           retention-days: 7
