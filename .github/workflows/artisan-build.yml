@@ -106,15 +106,33 @@ jobs:
 
       - name: Build Kernel Binary
         run: |
+          set -e
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
           
           mkdir -p out
+          
+          echo "1. Memperbaiki Typo OEM Xiaomi..."
+          # Terkadang ada typo di Makefile utama atau Kbuild yang membuat 'asm-generic' menjadi 'asmeneric'
+          # Kita gunakan find untuk mencari file yang mengandung string cacat ini dan memperbaikinya
+          find . -type f -name "Makefile*" -exec sed -i 's/asmeneric/asm-generic/g' {} + || true
+          
+          echo "2. Generate Base Defconfig..."
+          # Perintah make defconfig standar
           make O=out ARCH=arm64 vendor/peridot_user_defconfig
           
+          echo "3. Update Config untuk Compiler Baru (Non-Interactive)..."
+          # 'make olddefconfig' adalah kunci utama di CI/CD. 
+          # Perintah ini akan otomatis mengisi semua konfigurasi baru (yang ditanyakan Clang) 
+          # dengan nilai DEFAULT-nya, tanpa membekukan pipeline.
+          make O=out ARCH=arm64 olddefconfig
+          
+          echo "4. Memulai Kompilasi Utama..."
+          # Menambahkan LLVM=1 sangat direkomendasikan saat menggunakan Clang modern
           make -j$(nproc --all) O=out \
                       ARCH=arm64 \
+                      LLVM=1 \
                       CC=clang \
                       CLANG_TRIPLE=aarch64-linux-gnu- \
                       CROSS_COMPILE=aarch64-linux-gnu- \
