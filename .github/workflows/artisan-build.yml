@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 1
 
       # ---------------------------------------------------------
-      # PRAKTIK TERBAIK: Caching Toolchain untuk mempercepat CI/CD
+      # PRAKTIK TERBAIK: Caching Toolchain
       # ---------------------------------------------------------
       - name: Cache Toolchain
         id: cache-toolchain
@@ -54,18 +54,16 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
       # ---------------------------------------------------------
-      # SANITASI & INTEGRASI SISTEM (Hot-Patching Vendor Code)
+      # SANITASI & INTEGRASI SISTEM
       # ---------------------------------------------------------
-      - name: Sanitize Xiaomi OSS Source (Hot-Patch)
+      - name: Sanitize Xiaomi OSS Source & Setup KernelSU
         run: |
           set -e
           echo "Memperbaiki referensi Kconfig/Makefile yang rusak dari vendor..."
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
 
-      - name: Setup KernelSU Next
-        run: |
-          set -e
+          echo "Setup KernelSU Next..."
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
           
           if [ -d "drivers/kernelsu-next/kernel" ]; then
@@ -84,19 +82,31 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # MANAJEMEN KONFIGURASI (Feature Toggles & Optimizations)
+      # MANAJEMEN KONFIGURASI (Auto-Discovery + Feature Toggles)
       # ---------------------------------------------------------
       - name: Artisan Optimizations & New Features
         run: |
           set -e
-          DEFCONFIG="arch/arm64/configs/vendor/peridot_user_defconfig"
-
-          # Helper function agar injeksi config konsisten dan idempoten
+          
+          # AUTO-DISCOVERY: Mencari file defconfig peridot secara dinamis
+          echo "Mencari file defconfig peridot..."
+          FOUND_DEFCONFIG=$(find arch/arm64/configs -name "*peridot*defconfig*" | head -n 1)
+          
+          if [ -z "$FOUND_DEFCONFIG" ]; then
+            echo "❌ FATAL ERROR: File defconfig untuk peridot tidak ditemukan!"
+            exit 1
+          fi
+          
+          echo "✅ Defconfig ditemukan di: $FOUND_DEFCONFIG"
+          # Simpan path ke environment variable untuk step kompilasi nanti
+          echo "TARGET_DEFCONFIG=$FOUND_DEFCONFIG" >> $GITHUB_ENV
+          
+          # Helper function injeksi config yang idempoten
           set_config() {
             local KEY=$1
             local VAL=$2
-            sed -i "/^$KEY/d" "$DEFCONFIG" || true
-            echo "$KEY=$VAL" >> "$DEFCONFIG"
+            sed -i "/^$KEY/d" "$FOUND_DEFCONFIG" || true
+            echo "$KEY=$VAL" >> "$FOUND_DEFCONFIG"
           }
 
           # 1. KSU & OverlayFS
@@ -106,18 +116,18 @@ jobs:
           set_config "CONFIG_OVERLAY_FS" "y"
 
           # 2. Performance (-O3 & ThinLTO)
-          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
+          sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' "$FOUND_DEFCONFIG" || true
           set_config "CONFIG_LTO_CLANG_THIN" "y"
 
-          # 3. Debug Strip (Mengurangi ukuran kernel secara signifikan)
-          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
-          sed -i '/^CONFIG_DEBUG_INFO/d' $DEFCONFIG || true
+          # 3. Debug Strip
+          sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' "$FOUND_DEFCONFIG" || true
+          sed -i '/^CONFIG_DEBUG_INFO/d' "$FOUND_DEFCONFIG" || true
           set_config "CONFIG_DEBUG_INFO_NONE" "y"
           set_config "CONFIG_DEBUG_INFO" "n"
           set_config "CONFIG_KALLSYMS" "n"
           set_config "CONFIG_FTRACE" "n"
 
-          # 4. Power & Thermal (Mendukung deep sleep optimization)
+          # 4. Power & Thermal
           set_config "CONFIG_ENERGY_MODEL" "y"
           set_config "CONFIG_CPU_IDLE" "y"
           set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
@@ -128,41 +138,23 @@ jobs:
           set_config "CONFIG_NO_HZ_IDLE" "y"
           set_config "CONFIG_PREEMPT_DYNAMIC" "y"
 
-          # 6. Network Optimization (Termasuk TCP Latency dari update dev lain)
+          # 6. Network & Memory
           set_config "CONFIG_TCP_CONG_BBR" "y"
           set_config "CONFIG_DEFAULT_TCP_CONG" "bbr"
           set_config "CONFIG_NET_SCH_FQ" "y"
-          set_config "CONFIG_TCP_ECN" "y"
-          set_config "CONFIG_BPF_SYSCALL" "y"
-          set_config "CONFIG_NET_RX_BUSY_POLL" "y" # Mengurangi latensi network
-          set_config "CONFIG_BQL" "y"            # Byte Queue Limits (mendukung BBG/BBR)
-
-          # 7. Memory Optimization (SLUB Harden & Kompresi)
           set_config "CONFIG_ZRAM_DEF_COMP_LZ4" "y"
-          set_config "CONFIG_KSM" "n"
-          set_config "CONFIG_ZSWAP" "n"
-          set_config "CONFIG_SLUB_CPU_PARTIAL" "y"
-          set_config "CONFIG_SLAB_FREELIST_RANDOM" "y"
           set_config "CONFIG_SLAB_FREELIST_HARDENED" "y"
 
-          # 8. Security & TMPFS XATTR (Support Modding Lanjutan)
+          # 7. Security
           set_config "CONFIG_SECCOMP" "y"
-          set_config "CONFIG_SECCOMP_FILTER" "y"
           set_config "CONFIG_TMPFS_XATTR" "y"
-          set_config "CONFIG_TMPFS_POSIX_ACL" "y"
 
       # ---------------------------------------------------------
-      # KONTROL VERSI PATCH (Menghindari Spaghetti Code)
+      # PATCHING
       # ---------------------------------------------------------
-      - name: Apply Wild Kernel Patches (Source Modifications)
+      - name: Apply Wild Kernel Patches
         run: |
           set -e
-          echo "Menerapkan patch BBG dan optimasi Wakeup..."
-          
-          # CATATAN ARSITEKTUR: Jika ada patch dari dev lain berupa modifikasi source (.c atau .h),
-          # simpan file .patch tersebut di dalam folder 'patches/' di repository GitHub Anda.
-          # Sistem akan secara otomatis mengaplikasikannya di sini sebelum kompilasi.
-          
           if [ -d "$GITHUB_WORKSPACE/patches" ]; then
             for patch in $GITHUB_WORKSPACE/patches/*.patch; do
               echo "Applying $patch..."
@@ -184,14 +176,16 @@ jobs:
 
           mkdir -p out
 
-          echo "Generate Base Defconfig..."
-          make O=out ARCH=arm64 vendor/peridot_user_defconfig
+          # Mengambil nama defconfig dari env variable hasil auto-discovery
+          DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
+          echo "Generate Base Defconfig dari: $DEFCONFIG_BASENAME"
+          
+          make O=out ARCH=arm64 $DEFCONFIG_BASENAME
 
           echo "Update Config..."
           make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
 
           echo "Kompilasi Utama..."
-          # Pastikan menghasilkan target Image dan Image.gz secara eksplisit
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             LLVM=1 \
@@ -208,7 +202,7 @@ jobs:
             Image Image.gz
 
       # ---------------------------------------------------------
-      # PACKAGING DINAMIS (Mengatasi Issue 'Failed Busybox')
+      # PACKAGING (Solusi Anti-EOF & YAML Conflict)
       # ---------------------------------------------------------
       - name: Package with AnyKernel3 (Mutan Edition)
         run: |
@@ -222,39 +216,37 @@ jobs:
             cd AK3-Mutan
             rm -f anykernel.sh
             
-            # Injeksi file anykernel.sh yang bersih dan modern (GKI Compliant)
-            cat << 'EOF' > anykernel.sh
-            properties() { '
-            kernel.string=Mutan-Kernel-A16-NextGen
-            do.devicecheck=1
-            do.modules=0
-            do.systemless=1
-            do.cleanup=1
-            do.cleanuponabort=0
-            device.name1=peridot
-            supported.versions=14 - 16
-            '; }
-            block=boot
-            is_slot_device=auto
-            ramdisk_compression=auto
-            patch_vbmeta_flag=auto
-            no_magisk_check=1
+            # SOLUSI CTO: Gunakan echo berantai. 100% Bebas bug parser YAML/Bash.
+            echo "properties() { '" > anykernel.sh
+            echo "kernel.string=Mutan-Kernel-A16-NextGen" >> anykernel.sh
+            echo "do.devicecheck=1" >> anykernel.sh
+            echo "do.modules=0" >> anykernel.sh
+            echo "do.systemless=1" >> anykernel.sh
+            echo "do.cleanup=1" >> anykernel.sh
+            echo "do.cleanuponabort=0" >> anykernel.sh
+            echo "device.name1=peridot" >> anykernel.sh
+            echo "supported.versions=14 - 16" >> anykernel.sh
+            echo "'; }" >> anykernel.sh
             
-            . tools/ak3-core.sh
+            echo "block=boot" >> anykernel.sh
+            echo "is_slot_device=auto" >> anykernel.sh
+            echo "ramdisk_compression=auto" >> anykernel.sh
+            echo "patch_vbmeta_flag=auto" >> anykernel.sh
+            echo "no_magisk_check=1" >> anykernel.sh
+            echo ". tools/ak3-core.sh" >> anykernel.sh
             
-            split_boot
-            if [ -f "split_img/ramdisk.cpio" ]; then
-                unpack_ramdisk
-                write_boot
-            else
-                flash_boot
-            fi
-            EOF
+            echo "split_boot" >> anykernel.sh
+            echo 'if [ -f "split_img/ramdisk.cpio" ]; then' >> anykernel.sh
+            echo '    unpack_ramdisk' >> anykernel.sh
+            echo '    write_boot' >> anykernel.sh
+            echo 'else' >> anykernel.sh
+            echo '    flash_boot' >> anykernel.sh
+            echo 'fi' >> anykernel.sh
 
             echo "Membuat file ZIP..."
             zip -r9 ../Mutan-Kernel-Peridot-A16.zip * -x '*.git*'
           else
-            echo "Build Gagal: Binary kernel (Image.gz) tidak ditemukan!"
+            echo "❌ Build Gagal: Binary kernel (Image.gz) tidak ditemukan!"
             exit 1
           fi
 
