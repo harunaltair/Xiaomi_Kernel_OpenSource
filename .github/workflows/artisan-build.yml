@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # =========================================================
+      # [1] CHECKOUT KERNEL SOURCE
+      # =========================================================
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
@@ -18,6 +21,9 @@ jobs:
           ref: 'peridot-u-oss'
           fetch-depth: 1
 
+      # =========================================================
+      # [2] CACHE TOOLCHAIN
+      # =========================================================
       - name: Cache Toolchain
         id: cache-toolchain
         uses: actions/cache@v4
@@ -25,76 +31,134 @@ jobs:
           path: toolchain
           key: clang-15.0.7-20260208
 
+      # =========================================================
+      # [3] INSTALL BUILD DEPENDENCIES
+      # =========================================================
       - name: Install Build Dependencies
         run: |
           sudo apt update
-          sudo apt install -y bc bison build-essential flex git-core gnupg gperf \
-            libssl-dev libxml2-utils lzop python3 python-is-python3 zip zlib1g-dev \
-            llvm clang lld libelf-dev \
+          sudo apt install -y \
+            bc bison build-essential flex git-core gnupg gperf \
+            libssl-dev libxml2-utils lzop python3 python-is-python3 \
+            zip zlib1g-dev llvm clang lld libelf-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
 
+      # =========================================================
+      # [4] SETUP TOOLCHAIN
+      # =========================================================
       - name: Setup Toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
           mkdir -p toolchain && cd toolchain
-          curl -L --retry 3 --retry-delay 5 -o clang.tar.gz "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
+          curl -L --retry 3 --retry-delay 5 \
+            -o clang.tar.gz \
+            "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
           tar -xf clang.tar.gz
           rm -f clang.tar.gz
+
+      - name: Verify Toolchain
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
+          echo "=== Clang Version ==="
+          clang --version || { echo "❌ clang tidak ditemukan!"; exit 1; }
+          echo "=== LLD Version ==="
+          ld.lld --version || { echo "❌ ld.lld tidak ditemukan!"; exit 1; }
+          echo "=== Cross GCC ==="
+          aarch64-linux-gnu-gcc --version || { echo "❌ aarch64 gcc tidak ditemukan!"; exit 1; }
+          echo "✅ Toolchain OK"
 
       - name: Add Toolchain to PATH
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
 
+      # =========================================================
+      # [5] SANITIZE XIAOMI OSS SOURCE
+      # =========================================================
       - name: Sanitize Xiaomi OSS Source
         run: |
           set -e
+          # Hapus hwid yang sering jadi sumber error di Xiaomi OSS
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
+          echo "✅ Xiaomi OSS source sanitized"
 
+      # =========================================================
+      # [6] FIX BROKEN UAPI HEADERS
+      # Patch harus dilakukan di include/uapi SEBELUM make dipanggil.
+      # HDRTEST menguji file di usr/include/ yang di-generate dari sini.
+      # =========================================================
       - name: Fix Broken UAPI Headers
         run: |
-          # Fix 1: ispv4_defs.h — ganti uint32_t/uint64_t dengan __u32/__u64
-          # Harus dilakukan di source UAPI, bukan usr/include (yang di-generate saat build)
+          set -e
+
+          # ----------------------------------------------------------
+          # Fix 1: ispv4_defs.h
+          # Masalah : memakai uint32_t/uint64_t yang tidak valid di UAPI
+          # Fix     : ganti ke __u32/__u64, lalu include linux/types.h
+          # ----------------------------------------------------------
           ISPV4=$(find include/uapi -name "ispv4_defs.h" 2>/dev/null | head -n 1)
           if [ -n "$ISPV4" ]; then
-            sed -i 's/\buint32_t\b/__u32/g; s/\buint64_t\b/__u64/g; s/\buint8_t\b/__u8/g' "$ISPV4"
-            # Pastikan __u32 tersedia
+            # Ganti semua varian uint ke kernel-safe types
+            sed -i \
+              's/\buint8_t\b/__u8/g;
+               s/\buint16_t\b/__u16/g;
+               s/\buint32_t\b/__u32/g;
+               s/\buint64_t\b/__u64/g;
+               s/\bint8_t\b/__s8/g;
+               s/\bint16_t\b/__s16/g;
+               s/\bint32_t\b/__s32/g;
+               s/\bint64_t\b/__s64/g' "$ISPV4"
+            # Pastikan linux/types.h di-include
             if ! grep -q "linux/types.h" "$ISPV4"; then
               sed -i '1s|^|#include <linux/types.h>\n|' "$ISPV4"
             fi
             echo "✅ Patched: $ISPV4"
           else
-            echo "⚠️  ispv4_defs.h tidak ditemukan, skip."
+            echo "⚠️  ispv4_defs.h tidak ditemukan di include/uapi, skip."
           fi
-      
-          # Fix 2: videodev2.h — kembalikan ke struct timespec biasa
-          # dan tambahkan include time_types.h agar __kernel_old_timespec dikenali
+
+          # ----------------------------------------------------------
+          # Fix 2: videodev2.h
+          # Masalah : struct __kernel_old_timespec tidak punya definisi
+          #           karena linux/time_types.h tidak di-include
+          # Fix     : tambahkan include linux/time_types.h
+          # ----------------------------------------------------------
           VIDEODEV=$(find include/uapi -name "videodev2.h" 2>/dev/null | head -n 1)
           if [ -n "$VIDEODEV" ]; then
-            # Revert patch sebelumnya (kalau ada), lalu pakai pendekatan yang benar
-            sed -i 's/\bstruct __kernel_old_timespec\b\(\s*timestamp\)/struct __kernel_old_timespec\1/g' "$VIDEODEV"
-            # Tambahkan include linux/time_types.h jika belum ada
             if ! grep -q "linux/time_types.h" "$VIDEODEV"; then
-              # Tambahkan setelah include pertama yang ada
-              sed -i '/#include/a #include <linux/time_types.h>' "$VIDEODEV"
-              # Hapus duplikat jika ada lebih dari satu
-              awk '!seen[$0]++ || !/time_types/' "$VIDEODEV" > /tmp/vd2.h && mv /tmp/vd2.h "$VIDEODEV"
+              # Sisipkan setelah baris #include pertama yang ada
+              sed -i '0,/#include/s|#include|#include <linux/time_types.h>\n#include|' "$VIDEODEV"
             fi
             echo "✅ Patched: $VIDEODEV"
           else
-            echo "⚠️  videodev2.h tidak ditemukan, skip."
+            echo "⚠️  videodev2.h tidak ditemukan di include/uapi, skip."
           fi
 
+      # =========================================================
+      # [7] SETUP KERNELSU NEXT
+      # =========================================================
       - name: Setup KernelSU Next
         run: |
           set -e
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
-          
-          # Logic pemindahan folder yang lebih robust
+
+          # Robust folder move — handle perubahan struktur repo
           if [ -d "drivers/kernelsu-next/kernel" ]; then
-            cd drivers/kernelsu-next && mv kernel/* . && rm -rf kernel && cd ../..
+            cd drivers/kernelsu-next
+            # Pastikan tidak ada konflik sebelum mv
+            mv kernel/* . 2>/dev/null || true
+            rm -rf kernel
+            cd ../..
           fi
 
+          # Validasi: pastikan Kconfig dan Makefile KSU ada
+          if [ ! -f "drivers/kernelsu-next/Kconfig" ]; then
+            echo "❌ KernelSU-Next Kconfig tidak ditemukan setelah setup!"
+            ls -la drivers/kernelsu-next/
+            exit 1
+          fi
+
+          # Inject ke Makefile dan Kconfig kernel
           if ! grep -q "kernelsu-next" drivers/Makefile; then
             echo "obj-y += kernelsu-next/" >> drivers/Makefile
           fi
@@ -102,71 +166,257 @@ jobs:
             sed -i '$i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig
           fi
 
+          echo "✅ KernelSU Next setup selesai"
+
+      # =========================================================
+      # [8] KERNEL CONFIG SETUP
+      # =========================================================
       - name: Kernel Config Setup
         run: |
           set -e
-          # PRIORITAS: Gunakan defconfig spesifik vendor jika ada, atau GKI sebagai fallback
+
+          # Cari defconfig — prioritas dari yang paling spesifik
           if [ -f "arch/arm64/configs/vendor/peridot_user_defconfig" ]; then
             CONF="vendor/peridot_user_defconfig"
+          elif [ -f "arch/arm64/configs/peridot_user_defconfig" ]; then
+            CONF="peridot_user_defconfig"
           elif [ -f "arch/arm64/configs/gki_defconfig" ]; then
             CONF="gki_defconfig"
           else
-            CONF=$(find arch/arm64/configs/ -name "*peridot*" | head -n 1 | sed 's|arch/arm64/configs/||')
+            # Fallback: cari berdasarkan nama, tapi validasi hasilnya
+            FOUND=$(find arch/arm64/configs/ -name "*peridot*" | head -n 1)
+            if [ -z "$FOUND" ]; then
+              echo "❌ Tidak ada defconfig yang ditemukan! Periksa repo source."
+              exit 1
+            fi
+            CONF=$(echo "$FOUND" | sed 's|arch/arm64/configs/||')
+            echo "⚠️  Menggunakan fallback defconfig: $CONF"
           fi
-          
+
           echo "TARGET_DEFCONFIG=$CONF" >> $GITHUB_ENV
           DEFCONFIG="arch/arm64/configs/$CONF"
+          echo "✅ Menggunakan defconfig: $DEFCONFIG"
 
+          # Helper: set atau replace config value
           set_config() {
-            sed -i "/^$1/d" "$DEFCONFIG" || true
+            sed -i "/^$1[= ]/d" "$DEFCONFIG" || true
+            sed -i "/^# $1 is not set/d" "$DEFCONFIG" || true
             echo "$1=$2" >> "$DEFCONFIG"
           }
 
-          # --- FIX COMPILATION ERRORS ---
-          set_config CONFIG_FRAME_WARN 2048
-          set_config CONFIG_WERROR n
-          set_config CONFIG_FTRACE n
-          set_config CONFIG_TRACING n
+          # -------------------------------------------------------
+          # [A] COMPILATION STABILITY
+          # -------------------------------------------------------
+          set_config CONFIG_FRAME_WARN          4096   # Toleran untuk BPF stack
+          set_config CONFIG_WERROR              n
+          set_config CONFIG_FTRACE              n      # Nonaktif di release build
+          set_config CONFIG_FUNCTION_TRACER     n
+          set_config CONFIG_TRACING             y      # JANGAN nonaktif — dipakai Android
+          set_config CONFIG_TRACE_CLOCK         y
 
-          # --- CORE FEATURES & OPTIMIZATION ---
-          set_config CONFIG_KSU y
-          set_config CONFIG_KSU_NEXT y
-          set_config CONFIG_OVERLAY_FS y
-          set_config CONFIG_LTO_CLANG_THIN y
-          set_config CONFIG_HZ_300 y
-          set_config CONFIG_TCP_CONG_BBR y
-          set_config CONFIG_DEFAULT_TCP_CONG \"bbr\"
-          set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
+          # -------------------------------------------------------
+          # [B] ROOT ACCESS — KernelSU Next
+          # -------------------------------------------------------
+          set_config CONFIG_KSU                 y
+          set_config CONFIG_KSU_NEXT            y
+          set_config CONFIG_OVERLAY_FS          y
+          set_config CONFIG_OVERLAY_FS_REDIRECT_DIR y
+          set_config CONFIG_OVERLAY_FS_INDEX    y
 
+          # -------------------------------------------------------
+          # [C] CPU SCHEDULER & GOVERNOR
+          # -------------------------------------------------------
+          set_config CONFIG_CPU_FREQ_GOV_SCHEDUTIL          y
+          set_config CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL  y
+          set_config CONFIG_CPU_FREQ_GOV_PERFORMANCE        y
+          set_config CONFIG_CPU_FREQ_GOV_POWERSAVE          y
+          set_config CONFIG_CPU_FREQ_GOV_CONSERVATIVE       y
+          set_config CONFIG_CPU_FREQ_GOV_USERSPACE          y
+          set_config CONFIG_ENERGY_MODEL                    y
+          set_config CONFIG_CPU_IDLE                        y
+          set_config CONFIG_CPU_IDLE_GOV_TEO                y
+          set_config CONFIG_CPU_IDLE_GOV_LADDER             y
+          set_config CONFIG_CPU_IDLE_GOV_MENU               y
+          set_config CONFIG_UCLAMP_TASK                     y
+          set_config CONFIG_UCLAMP_TASK_GROUP               y
+          set_config CONFIG_HZ_300                          y
+
+          # -------------------------------------------------------
+          # [D] MEMORY MANAGEMENT
+          # -------------------------------------------------------
+          # ZRAM — swap terkompresi
+          set_config CONFIG_ZRAM                            y
+          set_config CONFIG_ZSMALLOC                        y
+          set_config CONFIG_ZRAM_DEF_COMP_LZ4               y
+
+          # ZSWAP — cache swap di RAM sebelum tulis ke disk
+          set_config CONFIG_ZSWAP                           y
+          set_config CONFIG_ZSWAP_COMPRESSOR_DEFAULT_LZ4    y
+          set_config CONFIG_ZSWAP_ZPOOL_DEFAULT_ZSMALLOC    y
+
+          # Transparent Huge Pages — MADVISE lebih aman dari ALWAYS
+          set_config CONFIG_TRANSPARENT_HUGEPAGE            y
+          set_config CONFIG_TRANSPARENT_HUGEPAGE_MADVISE    y
+
+          # PSI — WAJIB untuk LMKD Android 12+
+          set_config CONFIG_PSI                             y
+          set_config CONFIG_PSI_DEFAULT_DISABLED            n
+
+          # Memory cgroup — WAJIB untuk LMKD modern
+          set_config CONFIG_MEMCG                           y
+          set_config CONFIG_MEMCG_SWAP                      y
+          set_config CONFIG_MEMCG_KMEM                      y
+
+          # Cgroup umum
+          set_config CONFIG_CGROUPS                         y
+          set_config CONFIG_CGROUP_CPUACCT                  y
+          set_config CONFIG_CGROUP_SCHED                    y
+          set_config CONFIG_FAIR_GROUP_SCHED                y
+          set_config CONFIG_RT_GROUP_SCHED                  y
+          set_config CONFIG_CGROUP_FREEZER                  y
+          set_config CONFIG_CPUSETS                         y
+          set_config CONFIG_CGROUP_BPF                      y
+
+          # -------------------------------------------------------
+          # [E] I/O SCHEDULER
+          # -------------------------------------------------------
+          set_config CONFIG_IOSCHED_BFQ                     y
+          set_config CONFIG_BFQ_GROUP_IOSCHED               y
+          set_config CONFIG_DEFAULT_IOSCHED                 \"bfq\"
+          set_config CONFIG_MQ_IOSCHED_KYBER                y   # Alternatif untuk UFS
+
+          # -------------------------------------------------------
+          # [F] NETWORK
+          # -------------------------------------------------------
+          # BBR congestion control
+          set_config CONFIG_TCP_CONG_BBR                    y
+          set_config CONFIG_DEFAULT_TCP_CONG                \"bbr\"
+
+          # FQ & FQ-CoDel — kurangi bufferbloat
+          set_config CONFIG_NET_SCH_FQ                      y
+          set_config CONFIG_NET_SCH_FQ_CODEL                y
+          set_config CONFIG_NET_SCH_DEFAULT                 y
+          set_config CONFIG_DEFAULT_FQ_CODEL                y
+
+          # IPv6
+          set_config CONFIG_IPV6                            y
+          set_config CONFIG_IPV6_MULTIPLE_TABLES            y
+          set_config CONFIG_IPV6_SUBTREES                   y
+
+          # WireGuard — VPN modern, ringan
+          set_config CONFIG_WIREGUARD                       y
+
+          # Netfilter extras — untuk iptables/nftables
+          set_config CONFIG_NETFILTER                       y
+          set_config CONFIG_NF_CONNTRACK                    y
+          set_config CONFIG_NF_TABLES                       y
+          set_config CONFIG_NFT_NAT                         y
+          set_config CONFIG_IP_NF_IPTABLES                  y
+          set_config CONFIG_IP_NF_FILTER                    y
+          set_config CONFIG_IP_NF_NAT                       y
+          set_config CONFIG_IP_NF_MANGLE                    y
+
+          # -------------------------------------------------------
+          # [G] COMPILER OPTIMIZATION
+          # -------------------------------------------------------
+          # LTO Thin — aktif, tapi bisa dinonaktifkan jika ada miscompilation
+          set_config CONFIG_LTO_CLANG_THIN                  y
+          set_config CONFIG_LTO_CLANG_FULL                  n
+          set_config CONFIG_LTO_NONE                        n
+
+          # -------------------------------------------------------
+          # [H] SECURITY
+          # -------------------------------------------------------
+          set_config CONFIG_SECURITY                        y
+          set_config CONFIG_SECURITY_SELINUX                y
+          set_config CONFIG_SECURITY_SELINUX_BOOTPARAM      y
+          set_config CONFIG_HARDENED_USERCOPY               y
+          set_config CONFIG_FORTIFY_SOURCE                  y
+          set_config CONFIG_STACKPROTECTOR_STRONG           y
+          set_config CONFIG_RANDOMIZE_BASE                  y   # KASLR
+          set_config CONFIG_RANDOMIZE_MEMORY                y
+
+          # -------------------------------------------------------
+          # [I] ANDROID SPECIFIC
+          # -------------------------------------------------------
+          set_config CONFIG_ANDROID                         y
+          set_config CONFIG_ANDROID_BINDER_IPC              y
+          set_config CONFIG_ANDROID_BINDERFS                y
+          set_config CONFIG_SYNC                            y
+          set_config CONFIG_SW_SYNC                         y
+          set_config CONFIG_ION                             y
+          set_config CONFIG_DMA_SHARED_BUFFER               y
+
+          # Namespaces — dipakai container/sandbox Android
+          set_config CONFIG_NAMESPACES                      y
+          set_config CONFIG_UTS_NS                          y
+          set_config CONFIG_IPC_NS                          y
+          set_config CONFIG_PID_NS                          y
+          set_config CONFIG_NET_NS                          y
+          set_config CONFIG_USER_NS                         y
+
+          # -------------------------------------------------------
+          # [J] FILESYSTEMS
+          # -------------------------------------------------------
+          set_config CONFIG_EXT4_FS                         y
+          set_config CONFIG_EXT4_FS_POSIX_ACL               y
+          set_config CONFIG_F2FS_FS                         y
+          set_config CONFIG_F2FS_FS_COMPRESSION             y
+          set_config CONFIG_EROFS_FS                        y   # Format system partition HyperOS
+          set_config CONFIG_EROFS_FS_ZIP                    y
+          set_config CONFIG_TMPFS                           y
+          set_config CONFIG_TMPFS_POSIX_ACL                 y
+          set_config CONFIG_FUSE_FS                         y
+          set_config CONFIG_SDCARD_FS                       y
+
+          echo "✅ Semua config berhasil di-set"
+
+      # =========================================================
+      # [9] BUILD KERNEL
+      # =========================================================
       - name: Build Kernel
         run: |
           set -e
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
-          
+
           rm -rf out && mkdir -p out
-          
+
           DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
-          
-          echo "1. Menghasilkan base config..."
-          make O=out ARCH=arm64 $DEFCONFIG_BASENAME
-          
-          echo "2. Memaksa nilai default untuk opsi baru (Non-Interaktif)..."
-          # 'yes ""' akan menjawab 'Enter' (default) untuk semua pertanyaan config baru
+
+          echo "========================================"
+          echo " Step 1: Generate base config"
+          echo "========================================"
+          make O=out ARCH=arm64 "$DEFCONFIG_BASENAME"
+
+          echo "========================================"
+          echo " Step 2: oldconfig (non-interactive)"
+          echo "========================================"
           yes "" | make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang oldconfig
-          
-          echo "3. Kompilasi Utama..."
-          # Menggunakan LLVM_IAS=1 untuk stabilitas assembler modern
-          make -j$(nproc --all) O=out \
-            ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
+
+          echo "========================================"
+          echo " Step 3: Main compilation"
+          echo "========================================"
+          make -j$(nproc --all) O=out        \
+            ARCH=arm64                        \
+            LLVM=1                            \
+            LLVM_IAS=1                        \
+            CC=clang                          \
+            CLANG_TRIPLE=aarch64-linux-gnu-   \
+            CROSS_COMPILE=aarch64-linux-gnu-  \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            LD=ld.lld                         \
+            AR=llvm-ar                        \
+            NM=llvm-nm                        \
+            OBJCOPY=llvm-objcopy              \
+            OBJDUMP=llvm-objdump              \
+            STRIP=llvm-strip                  \
             Image.gz 2>&1 | tee build.log
 
+      # =========================================================
+      # [10] UPLOAD BUILD LOG — selalu, bahkan kalau gagal
+      # =========================================================
       - name: Upload Build Log
         if: always()
         uses: actions/upload-artifact@v4
@@ -174,19 +424,24 @@ jobs:
           name: build-log
           path: build.log
 
+      # =========================================================
+      # [11] PACKAGE ANYKERNEL3
+      # =========================================================
       - name: Package AnyKernel3
         run: |
           set -e
+
+          # Validasi output build
           if [ ! -f out/arch/arm64/boot/Image.gz ]; then
-            echo "❌ Build Gagal: Image.gz tidak ditemukan!"
+            echo "❌ Build gagal: Image.gz tidak ditemukan!"
             exit 1
           fi
-          
+
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
           cp out/arch/arm64/boot/Image.gz AK3/
           cd AK3
-          
-          # FIX: Syntax AnyKernel3 membutuhkan tanda petik tunggal pada properties
+
+          # Tulis anykernel.sh di column 0 agar tidak ada leading whitespace
           cat > anykernel.sh << 'EOF'
           properties() { '
           kernel.string=Mutan-Kernel-A16-NextGen
@@ -212,8 +467,13 @@ jobs:
               flash_boot;
           fi
           EOF
-          zip -r9 ../kernel-mutan.zip * -x '*.git*'
 
+          zip -r9 ../kernel-mutan.zip . -x '*.git*'
+          echo "✅ Package selesai: kernel-mutan.zip"
+
+      # =========================================================
+      # [12] UPLOAD KERNEL
+      # =========================================================
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
