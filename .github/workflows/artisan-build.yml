@@ -51,6 +51,26 @@ jobs:
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
 
+      - name: Fix Broken UAPI Headers
+        run: |
+          # Fix 1: ispv4_defs.h — missing #include <linux/types.h>
+          # Menyebabkan: unknown type name 'uint32_t' / 'uint64_t'
+          ISPV4="usr/include/media/ispv4_defs.h"
+          if [ -f "$ISPV4" ]; then
+            if ! grep -q "linux/types.h" "$ISPV4"; then
+              sed -i '1s|^|#include <linux/types.h>\n|' "$ISPV4"
+              echo "✅ Patched: $ISPV4"
+            fi
+          fi
+
+          # Fix 2: videodev2.h — struct timespec incomplete di userspace
+          # Menyebabkan: field has incomplete type 'struct timespec'
+          VIDEODEV="usr/include/linux/videodev2.h"
+          if [ -f "$VIDEODEV" ]; then
+            sed -i 's/\bstruct timespec\b\(\s*timestamp\)/struct __kernel_old_timespec\1/g' "$VIDEODEV"
+            echo "✅ Patched: $VIDEODEV"
+          fi
+
       - name: Setup KernelSU Next
         run: |
           set -e
