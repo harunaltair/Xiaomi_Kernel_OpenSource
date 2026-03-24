@@ -82,23 +82,23 @@ jobs:
           fi
 
       # ---------------------------------------------------------
-      # MANAJEMEN KONFIGURASI (Auto-Discovery + Feature Toggles)
+      # MANAJEMEN KONFIGURASI (Targeting GKI 2.0 Defconfig)
       # ---------------------------------------------------------
       - name: Artisan Optimizations & New Features
         run: |
           set -e
           
-          # AUTO-DISCOVERY: Mencari file defconfig peridot secara dinamis
-          echo "Mencari file defconfig peridot..."
-          FOUND_DEFCONFIG=$(find arch/arm64/configs -name "*peridot*defconfig*" | head -n 1)
+          # Karena Poco F6 (SM8635) adalah GKI 2.0, defconfig utamanya
+          # adalah gki_defconfig standar, BUKAN peridot_defconfig.
+          FOUND_DEFCONFIG="arch/arm64/configs/gki_defconfig"
           
-          if [ -z "$FOUND_DEFCONFIG" ]; then
-            echo "❌ FATAL ERROR: File defconfig untuk peridot tidak ditemukan!"
+          if [ ! -f "$FOUND_DEFCONFIG" ]; then
+            echo "❌ FATAL ERROR: gki_defconfig tidak ditemukan!"
+            ls -la arch/arm64/configs/
             exit 1
           fi
           
-          echo "✅ Defconfig ditemukan di: $FOUND_DEFCONFIG"
-          # Simpan path ke environment variable untuk step kompilasi nanti
+          echo "✅ Menggunakan GKI Defconfig: $FOUND_DEFCONFIG"
           echo "TARGET_DEFCONFIG=$FOUND_DEFCONFIG" >> $GITHUB_ENV
           
           # Helper function injeksi config yang idempoten
@@ -176,7 +176,7 @@ jobs:
 
           mkdir -p out
 
-          # Mengambil nama defconfig dari env variable hasil auto-discovery
+          # Mengambil nama defconfig dari env variable
           DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
           echo "Generate Base Defconfig dari: $DEFCONFIG_BASENAME"
           
