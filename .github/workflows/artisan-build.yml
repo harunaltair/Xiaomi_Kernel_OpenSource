@@ -1,6 +1,8 @@
 name: Build Poco F6 Next-Gen Artisan Kernel
 
 on:
+  push:
+    branches: [ "peridot-u-oss" ]
   workflow_dispatch:
 
 jobs:
