@@ -48,42 +48,35 @@ jobs:
       - name: Sanitize Xiaomi OSS Source
         run: |
           set -e
-          echo "Membersihkan referensi hwid yang rusak..."
+          echo "Cleaning up broken Xiaomi references..."
           sed -i '/source "drivers\/misc\/hwid\/Kconfig"/d' drivers/misc/Kconfig || true
           sed -i '/obj-y += hwid\//d' drivers/misc/Makefile || true
-          echo "Sanitasi selesai."
+          # Fix potential trace conflict in Makefile
+          sed -i 's/libs-y[[:space:]]*:= lib\//libs-y := lib\/ kernel\/trace\//g' Makefile || true
+          echo "Sanitization complete."
 
       - name: Setup KernelSU Next
         run: |
           set -e
-          # Clone ke folder sementara dulu
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/ksu_tmp
-          
-          # Cek di mana letak Kconfig yang sebenarnya
           if [ -f "drivers/ksu_tmp/kernel/Kconfig" ]; then
             mv drivers/ksu_tmp/kernel drivers/kernelsu-next
             rm -rf drivers/ksu_tmp
           else
             mv drivers/ksu_tmp drivers/kernelsu-next
           fi
-
-          # Hooking ke Kernel Tree dengan path yang sudah pasti benar
           if ! grep -q "kernelsu-next" drivers/Makefile; then
             echo "obj-y += kernelsu-next/" >> drivers/Makefile
           fi
-          
           if ! grep -q "kernelsu-next" drivers/Kconfig; then
-            # Gunakan sed untuk menyisipkan sebelum endmenu terakhir agar lebih rapi
             sed -i '$i source "drivers/kernelsu-next/Kconfig"' drivers/Kconfig
           fi
-          echo "Integrasi KernelSU Next selesai."
 
       - name: Kernel Config Setup
         run: |
           set -e
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
           if [ ! -f "$DEFCONFIG" ]; then
-            echo "❌ gki_defconfig tidak ditemukan, mencoba jalur vendor..."
             DEFCONFIG="arch/arm64/configs/vendor/gki_defconfig"
           fi
           echo "TARGET_DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
@@ -93,21 +86,21 @@ jobs:
             echo "$1=$2" >> $DEFCONFIG
           }
 
-          # Core Features
+          # --- FIX ERROR 2: DISABLE TRACING ---
+          set_config CONFIG_FTRACE n
+          set_config CONFIG_TRACING n
+          set_config CONFIG_FUNCTION_TRACER n
+          set_config CONFIG_STACK_TRACER n
+          set_config CONFIG_DYNAMIC_FTRACE n
+
+          # Core & Optimizations
           set_config CONFIG_KSU y
           set_config CONFIG_KSU_NEXT y
-          set_config CONFIG_KSU_HIDE_PROCFS y
           set_config CONFIG_OVERLAY_FS y
-          set_config CONFIG_LTO_CLANG_THIN y
-          
-          # Networking & Latency
           set_config CONFIG_TCP_CONG_BBR y
           set_config CONFIG_DEFAULT_TCP_CONG bbr
-          set_config CONFIG_NET_SCH_FQ y
           set_config CONFIG_HZ_300 y
           set_config CONFIG_BPF_SYSCALL y
-          
-          # Memory
           set_config CONFIG_ZRAM_DEF_COMP_LZ4 y
 
       - name: Build Kernel
@@ -116,9 +109,11 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchain/bin:$PATH"
-          mkdir -p out
-          DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
           
+          # Bersihkan sisa build sebelumnya agar tidak korup
+          rm -rf out && mkdir -p out
+          
+          DEFCONFIG_BASENAME=$(basename "$TARGET_DEFCONFIG")
           make O=out ARCH=arm64 $DEFCONFIG_BASENAME
           make O=out ARCH=arm64 LLVM=1 CC=clang olddefconfig
           
@@ -142,14 +137,13 @@ jobs:
         run: |
           set -e
           if [ ! -f out/arch/arm64/boot/Image.gz ]; then
-            echo "❌ Image.gz tidak ditemukan"
+            echo "❌ Build Gagal: Image.gz tidak ditemukan di folder out"
             exit 1
           fi
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AK3
           cp out/arch/arm64/boot/Image.gz AK3/
           cd AK3
           
-          # Buat anykernel.sh secara dinamis
           cat > anykernel.sh << 'EOF'
           properties() {
           kernel.string=Mutan-Kernel-A16-NextGen
