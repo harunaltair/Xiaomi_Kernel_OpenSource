@@ -23,7 +23,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: toolchain
-          key: clang-15.0.7-20230802
+          key: clang-15.0.7-20260208
 
       - name: Install Build Dependencies
         run: |
@@ -37,12 +37,25 @@ jobs:
       - name: Setup Toolchain (ZyCromerZ Clang 15)
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          mkdir -p toolchain
-          cd toolchain
-          # Gunakan tanggal release yang valid (20230802, bukan 20260208)
-          curl -LO https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20230802-release/Clang-15.0.7-20230802.tar.gz
-          tar -xf Clang-15.0.7-20230802.tar.gz
-          rm -f Clang-15.0.7-20230802.tar.gz
+          mkdir -p toolchain && cd toolchain
+
+          curl -L \
+            --retry 3 \
+            --retry-delay 5 \
+            -o clang.tar.gz \
+            "https://github.com/ZyCromerZ/Clang/releases/download/15.0.7-20260208-release/Clang-15.0.7-20260208.tar.gz"
+
+          FILESIZE=$(stat -c%s clang.tar.gz)
+          echo "Downloaded: $FILESIZE bytes"
+          if [ "$FILESIZE" -lt 1000000 ]; then
+            echo "ERROR: Download gagal, isi file:"
+            cat clang.tar.gz
+            exit 1
+          fi
+
+          tar -xf clang.tar.gz
+          rm -f clang.tar.gz
+          echo "Clang ready: $(bin/clang --version | head -1)"
 
       - name: Add Toolchain to PATH
         run: echo "$GITHUB_WORKSPACE/toolchain/bin" >> $GITHUB_PATH
@@ -63,7 +76,6 @@ jobs:
           git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next drivers/kernelsu-next
 
           echo "2. Verifikasi struktur folder KSU..."
-          # Cek apakah subfolder 'kernel/' ada, fallback ke root jika tidak
           if [ -d "drivers/kernelsu-next/kernel" ]; then
             KSU_MAKEFILE_PATH="kernelsu-next/kernel/"
             KSU_KCONFIG_PATH="drivers/kernelsu-next/kernel/Kconfig"
@@ -89,7 +101,7 @@ jobs:
           set_config() {
             local KEY=$1
             local VAL=$2
-            sed -i "/$KEY/d" "$DEFCONFIG" || true
+            sed -i "/^$KEY/d" "$DEFCONFIG" || true
             echo "$KEY=$VAL" >> "$DEFCONFIG"
           }
 
@@ -116,8 +128,7 @@ jobs:
           sed -i 's/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y/CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y/g' $DEFCONFIG || true
           set_config "CONFIG_LTO_CLANG_THIN" "y"
 
-          echo "=== 2. Debug Strip (AMAN - defconfig only) ==="
-          # FIXED: Tidak lagi menyentuh Makefile dengan sed -g
+          echo "=== 2. Debug Strip (defconfig only) ==="
           sed -i 's/CONFIG_DEBUG_KERNEL=y/CONFIG_DEBUG_KERNEL=n/g' $DEFCONFIG || true
           sed -i '/^CONFIG_DEBUG_INFO/d' $DEFCONFIG || true
           set_config "CONFIG_DEBUG_INFO_NONE" "y"
@@ -126,8 +137,6 @@ jobs:
           set_config "CONFIG_FTRACE" "n"
 
           echo "=== 3. Power & Thermal ==="
-          # FIXED: Tidak lagi sed pada file .c
-          # Thermal limit diatur lewat defconfig, bukan hardcode ke source C
           set_config "CONFIG_ENERGY_MODEL" "y"
           set_config "CONFIG_CPU_IDLE" "y"
           set_config "CONFIG_CPU_FREQ_GOV_SCHEDUTIL" "y"
